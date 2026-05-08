@@ -21,3 +21,8 @@ frontend/.next/
 
 # Solana keypair — never commit private keys
 id.json
+
+# Editor / agent state
+.claude/
+.cursor/
+.vscode/

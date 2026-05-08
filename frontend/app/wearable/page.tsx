@@ -4,7 +4,11 @@ import { toast } from "sonner";
 
 const API = "http://127.0.0.1:8000";
 
-type FitbitStatus = {
+type Provider = "fitbit" | "whoop" | "oura";
+
+type ProviderStatus = {
+  provider: Provider;
+  label: string;
   connected: boolean;
   configured: boolean;
   user_id: string;
@@ -12,171 +16,207 @@ type FitbitStatus = {
 };
 
 type SyncResult = {
+  provider: Provider;
   doc_id: string;
   synced_observations: number;
   date_range: string;
 };
 
-export default function WearablePage() {
-  const [status, setStatus] = useState<FitbitStatus | null>(null);
-  const [syncing, setSyncing] = useState(false);
-  const [syncResult, setSyncResult] = useState<SyncResult | null>(null);
+const PROVIDER_META: Record<Provider, {
+  glyph: string;
+  metrics: string;
+  setupUrl: string;
+  callbackPath: string;
+  envClientId: string;
+  envClientSecret: string;
+}> = {
+  fitbit: {
+    glyph: "♡",
+    metrics: "Steps · Calories · Active min · Resting HR · Sleep",
+    setupUrl: "https://dev.fitbit.com/apps/new",
+    callbackPath: "/api/wearable/fitbit/callback",
+    envClientId: "FITBIT_CLIENT_ID",
+    envClientSecret: "FITBIT_CLIENT_SECRET",
+  },
+  whoop: {
+    glyph: "◐",
+    metrics: "Recovery · Strain · HRV · Resting HR · Sleep",
+    setupUrl: "https://developer.whoop.com",
+    callbackPath: "/api/wearable/whoop/callback",
+    envClientId: "WHOOP_CLIENT_ID",
+    envClientSecret: "WHOOP_CLIENT_SECRET",
+  },
+  oura: {
+    glyph: "◯",
+    metrics: "Sleep · Readiness · Activity · HRV · SpO₂",
+    setupUrl: "https://cloud.ouraring.com/oauth/applications",
+    callbackPath: "/api/wearable/oura/callback",
+    envClientId: "OURA_CLIENT_ID",
+    envClientSecret: "OURA_CLIENT_SECRET",
+  },
+};
 
-  const fetchStatus = useCallback(async () => {
+function ProviderCard({ status, onConnect, onSync, syncing, lastResult }: {
+  status: ProviderStatus;
+  onConnect: () => void;
+  onSync: () => void;
+  syncing: boolean;
+  lastResult: SyncResult | null;
+}) {
+  const meta = PROVIDER_META[status.provider];
+  return (
+    <div className="card space-y-4">
+      <div className="flex items-center justify-between gap-4">
+        <div className="flex items-center gap-3">
+          <div className="wallet-icon"><span className="text-base">{meta.glyph}</span></div>
+          <div>
+            <p className="proof-name">{status.label}</p>
+            <p className="proof-meta mt-0.5">{meta.metrics}</p>
+            {status.connected ? (
+              <p className="wallet-saved mt-1">
+                Connected{status.user_id ? ` · ${status.user_id}` : ""}{status.last_sync ? ` · last sync ${status.last_sync}` : ""}
+              </p>
+            ) : status.configured ? (
+              <p className="wallet-none mt-1">Not connected</p>
+            ) : (
+              <p className="wallet-none mt-1">Setup required</p>
+            )}
+          </div>
+        </div>
+        <div className="flex items-center gap-2 flex-shrink-0">
+          {status.connected && (
+            <button onClick={onSync} disabled={syncing} className="btn-ghost">
+              {syncing ? "Syncing…" : "Sync"}
+            </button>
+          )}
+          <button
+            onClick={onConnect}
+            disabled={!status.configured}
+            className={status.connected ? "btn-disconnect" : "btn-connect"}
+          >
+            {status.connected ? "Reconnect" : "Connect"}
+          </button>
+        </div>
+      </div>
+
+      {!status.configured && (
+        <div className="card-sunk space-y-1 text-xs">
+          <p className="how-strong">Setup</p>
+          <ol className="space-y-1 text-[var(--ink-3)] list-decimal list-inside">
+            <li>Create a developer app at <a href={meta.setupUrl} target="_blank" rel="noopener noreferrer" className="solana-link">{new URL(meta.setupUrl).host}</a></li>
+            <li>Set the OAuth callback URL to <code className="font-mono bg-[var(--paper-sunk)] px-1 py-0.5 rounded">http://localhost:8000{meta.callbackPath}</code></li>
+            <li>Add <code className="font-mono bg-[var(--paper-sunk)] px-1 py-0.5 rounded">{meta.envClientId}</code> and <code className="font-mono bg-[var(--paper-sunk)] px-1 py-0.5 rounded">{meta.envClientSecret}</code> to <code className="font-mono">.env</code> and restart the backend</li>
+          </ol>
+        </div>
+      )}
+
+      {lastResult && lastResult.provider === status.provider && (
+        <div className="card-sunk space-y-1">
+          <p className="verify-ok">✓ Synced {lastResult.synced_observations} observations</p>
+          <p className="stat-label">{lastResult.date_range}</p>
+        </div>
+      )}
+    </div>
+  );
+}
+
+export default function WearablePage() {
+  const [providers, setProviders] = useState<ProviderStatus[]>([]);
+  const [syncing, setSyncing] = useState<Provider | null>(null);
+  const [lastResult, setLastResult] = useState<SyncResult | null>(null);
+
+  const fetchAll = useCallback(async () => {
     try {
-      const s = await fetch(`${API}/api/wearable/fitbit/status`).then(r => r.json());
-      setStatus(s);
+      const list: ProviderStatus[] = await fetch(`${API}/api/wearable/list`).then(r => r.json());
+      setProviders(list);
     } catch {
       // backend may be starting
     }
   }, []);
 
-  useEffect(() => { fetchStatus(); }, [fetchStatus]);
+  useEffect(() => { fetchAll(); }, [fetchAll]);
 
-  async function handleConnect() {
+  async function handleConnect(p: Provider) {
     try {
-      const { url } = await fetch(`${API}/api/wearable/fitbit/auth-url`).then(r => r.json());
-      const popup = window.open(url, "fitbit-auth", "width=600,height=700,left=200,top=100");
+      const { url } = await fetch(`${API}/api/wearable/${p}/auth-url`).then(r => {
+        if (!r.ok) return r.json().then(d => Promise.reject(new Error(d.detail)));
+        return r.json();
+      });
+      const popup = window.open(url, `${p}-auth`, "width=600,height=750,left=200,top=100");
       if (!popup) {
         toast.error("Popup blocked — allow popups for this page");
         return;
       }
-      // Poll until popup closes, then re-fetch status
       const timer = setInterval(async () => {
         if (popup.closed) {
           clearInterval(timer);
-          await fetchStatus();
-          toast.success("Fitbit connected — click Sync to import your data");
+          await fetchAll();
+          toast.success("Connected — click Sync to import your data");
         }
       }, 600);
     } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : String(err);
-      if (msg.includes("FITBIT_CLIENT_ID")) {
-        toast.error("Add FITBIT_CLIENT_ID and FITBIT_CLIENT_SECRET to your .env — see .env.example");
-      } else {
-        toast.error(`Failed: ${msg}`);
-      }
+      toast.error(`Failed: ${err instanceof Error ? err.message : String(err)}`);
     }
   }
 
-  async function handleSync() {
-    setSyncing(true);
-    setSyncResult(null);
+  async function handleSync(p: Provider) {
+    setSyncing(p);
+    setLastResult(null);
     try {
-      const result: SyncResult = await fetch(`${API}/api/wearable/fitbit/sync`, { method: "POST" }).then(r => {
+      const result: SyncResult = await fetch(`${API}/api/wearable/${p}/sync`, { method: "POST" }).then(r => {
         if (!r.ok) return r.json().then(d => Promise.reject(new Error(d.detail)));
         return r.json();
       });
-      setSyncResult(result);
-      toast.success(`Synced ${result.synced_observations} observations`);
-      await fetchStatus();
+      setLastResult(result);
+      toast.success(`Synced ${result.synced_observations} observations from ${PROVIDER_META[p].glyph} ${p}`);
+      await fetchAll();
     } catch (err: unknown) {
       toast.error(`Sync failed: ${err instanceof Error ? err.message : String(err)}`);
     } finally {
-      setSyncing(false);
+      setSyncing(null);
     }
   }
-
-  const notConfigured = status && !status.configured;
-  const notConnected = status && status.configured && !status.connected;
-  const connected = status?.connected;
 
   return (
     <div className="space-y-8 cascade">
       <div>
-        <h1 className="page-title">Wearable Connect</h1>
+        <h1 className="page-title">Connect a wearable</h1>
         <p className="page-subtitle">
-          Pull data directly from your wearable account — no manual CSV export needed.
+          Pull data directly from your device — no manual export, no CSV upload. Each sync auto-attests every observation.
         </p>
       </div>
 
-      {/* Fitbit card */}
-      <section className="space-y-2">
-        <p className="section-label">Fitbit</p>
-        <div className="card space-y-4">
-          <div className="flex items-center justify-between gap-4">
-            <div className="flex items-center gap-3">
-              <div className="wallet-icon"><span className="text-sm">♡</span></div>
-              <div>
-                <p className="section-label">Fitbit</p>
-                {connected ? (
-                  <p className="wallet-saved mt-0.5">
-                    Connected{status.user_id ? ` · ${status.user_id}` : ""}
-                  </p>
-                ) : (
-                  <p className="wallet-none mt-0.5">Not connected</p>
-                )}
-              </div>
-            </div>
-            <div className="flex items-center gap-2 flex-shrink-0">
-              {connected && (
-                <button onClick={handleSync} disabled={syncing} className="btn-ghost">
-                  {syncing ? "Syncing…" : "Sync now"}
-                </button>
-              )}
-              <button
-                onClick={handleConnect}
-                disabled={notConfigured ?? false}
-                className={connected ? "btn-disconnect" : "btn-connect"}
-              >
-                {connected ? "Reconnect" : "Connect Fitbit"}
-              </button>
-            </div>
-          </div>
-
-          {notConfigured && (
-            <div className="card-sunk space-y-1">
-              <p className="how-strong">Setup required</p>
-              <ol className="space-y-1 text-sm text-[var(--fg-muted)] list-decimal list-inside">
-                <li>Create a free app at <a href="https://dev.fitbit.com/apps/new" target="_blank" rel="noopener noreferrer" className="solana-link">dev.fitbit.com/apps/new</a></li>
-                <li>Set OAuth 2.0 Application Type to <strong>Personal</strong></li>
-                <li>Set Callback URL to <code className="font-mono text-xs bg-[var(--surface-2)] px-1 py-0.5 rounded">http://localhost:8000/api/wearable/fitbit/callback</code></li>
-                <li>Add <code className="font-mono text-xs bg-[var(--surface-2)] px-1 py-0.5 rounded">FITBIT_CLIENT_ID</code> and <code className="font-mono text-xs bg-[var(--surface-2)] px-1 py-0.5 rounded">FITBIT_CLIENT_SECRET</code> to your <code className="font-mono text-xs">.env</code> and restart the backend</li>
-              </ol>
-            </div>
-          )}
-
-          {connected && status.last_sync && (
-            <p className="stat-label">Last sync: {status.last_sync}</p>
-          )}
-
-          {syncResult && (
-            <div className="card-sunk space-y-1">
-              <p className="verify-ok">✓ Synced {syncResult.synced_observations} observations</p>
-              <p className="stat-label">{syncResult.date_range}</p>
-              <p className="stat-label">View in <a href="/dashboard" className="solana-link">Dashboard</a> or chat about it on the <a href="/" className="solana-link">Chat</a> page.</p>
-            </div>
-          )}
-        </div>
+      <section className="space-y-3">
+        {providers.length === 0 ? (
+          <div className="card"><p className="empty-state">Loading providers…</p></div>
+        ) : (
+          providers.map((s) => (
+            <ProviderCard
+              key={s.provider}
+              status={s}
+              onConnect={() => handleConnect(s.provider)}
+              onSync={() => handleSync(s.provider)}
+              syncing={syncing === s.provider}
+              lastResult={lastResult}
+            />
+          ))
+        )}
       </section>
 
-      {/* What gets synced */}
       <details className="how-details">
         <summary className="how-summary">
-          <span className="how-arrow">▶</span> What data is synced?
+          <span className="how-arrow">▶</span> How does this work?
         </summary>
         <div className="how-body space-y-2">
-          <p>ZKHealth fetches the last 7 days from these Fitbit endpoints:</p>
-          <ul className="space-y-1 text-sm text-[var(--fg-muted)] list-disc list-inside">
-            <li><strong className="how-strong">Steps</strong> — daily step count</li>
-            <li><strong className="how-strong">Calories burned</strong> — total daily calories</li>
-            <li><strong className="how-strong">Active minutes</strong> — fairly + very active minutes</li>
-            <li><strong className="how-strong">Resting heart rate</strong> — daily resting HR</li>
-            <li><strong className="how-strong">Sleep hours</strong> — main sleep duration each night</li>
-          </ul>
-          <p>All data is stored locally and each observation gets a ZK attestation automatically — the same as uploading a CSV.</p>
-        </div>
-      </details>
-
-      {/* Coming soon */}
-      <details className="how-details">
-        <summary className="how-summary">
-          <span className="how-arrow">▶</span> More integrations (coming soon)
-        </summary>
-        <div className="how-body space-y-1">
-          {["WHOOP — HRV, strain, recovery", "Garmin Connect — running, sleep, stress", "Apple Health — via on-device export or future direct sync", "Oura Ring — sleep stages, readiness"].map(s => (
-            <p key={s} className="stat-label opacity-60">{s}</p>
-          ))}
+          <p>
+            <strong className="how-strong">OAuth2 only.</strong> ZKHealth never sees your provider password — you authorize at the provider's site, and the backend stores the access/refresh tokens locally in SQLite.
+          </p>
+          <p>
+            <strong className="how-strong">Auto-attestation.</strong> Each synced observation is hashed with Poseidon and signed, identical to a CSV upload — so you can immediately mint ZK proofs against the data on the <a href="/zk" className="solana-link">ZK Proofs</a> page.
+          </p>
+          <p>
+            <strong className="how-strong">Token refresh.</strong> Expired access tokens are refreshed transparently using the stored refresh token before each sync.
+          </p>
         </div>
       </details>
     </div>

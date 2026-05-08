@@ -42,6 +42,8 @@ export default function ChatPage() {
   const [input, setInput] = useState("");
   const [uploading, setUploading] = useState(false);
   const [thinking, setThinking] = useState(false);
+  const [seeding, setSeeding] = useState(false);
+  const [insightsLoading, setInsightsLoading] = useState(false);
   const fileRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
@@ -81,6 +83,43 @@ export default function ChatPage() {
     } finally {
       setUploading(false);
       if (fileRef.current) fileRef.current.value = "";
+    }
+  }
+
+  async function handleLoadDemo() {
+    setSeeding(true);
+    try {
+      const res = await fetch(`${API}/api/demo/load`, { method: "POST" });
+      if (!res.ok) throw new Error((await res.json()).detail);
+      const data = await res.json();
+      if (data.already_loaded) {
+        toast.info("Demo data already loaded");
+      } else {
+        toast.success(`Loaded ${data.lab_observations} lab values + ${data.wearable_observations} wearable readings`);
+        setHasExistingData(true);
+        setMessages((m) => [...m, {
+          role: "assistant",
+          text: `Loaded a sample bloodwork panel (${data.lab_observations} biomarkers) and 7 days of wearable data (${data.wearable_observations} readings). Try asking *"What stands out in my bloodwork?"* or click **Generate insights** above.`,
+        }]);
+      }
+    } catch (err: unknown) {
+      toast.error(`Failed: ${err instanceof Error ? err.message : String(err)}`);
+    } finally {
+      setSeeding(false);
+    }
+  }
+
+  async function handleInsights() {
+    setInsightsLoading(true);
+    try {
+      const res = await fetch(`${API}/api/insights`, { method: "POST" });
+      if (!res.ok) throw new Error((await res.json()).detail);
+      const { summary } = await res.json();
+      setMessages((m) => [...m, { role: "assistant", text: summary }]);
+    } catch (err: unknown) {
+      toast.error(`Insights failed: ${err instanceof Error ? err.message : String(err)}`);
+    } finally {
+      setInsightsLoading(false);
     }
   }
 
@@ -130,6 +169,19 @@ export default function ChatPage() {
           </p>
         </div>
       </label>
+
+      <div className="flex flex-wrap gap-2">
+        {!hasExistingData && (
+          <button onClick={handleLoadDemo} disabled={seeding} className="btn-mode-active">
+            {seeding ? "Loading…" : "✨ Try with sample data"}
+          </button>
+        )}
+        {hasExistingData && (
+          <button onClick={handleInsights} disabled={insightsLoading} className="btn-mode-active">
+            {insightsLoading ? "Analyzing…" : "✨ Generate insights"}
+          </button>
+        )}
+      </div>
 
       {loadedFiles.length > 0 && (
         <div className="loaded-bar">

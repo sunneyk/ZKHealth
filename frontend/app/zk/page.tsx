@@ -14,7 +14,6 @@ function WalletBar() {
   const { publicKey, connected, connecting, connect, disconnect, select, wallets } = useWallet();
   const [savedKey, setSavedKey] = useState("");
   const [pendingConnect, setPendingConnect] = useState(false);
-  const [airdropping, setAirdropping] = useState(false);
 
   useEffect(() => {
     fetch(`${API}/api/zk/wallet`).then(r => r.json()).then(d => setSavedKey(d.pubkey || "")).catch(() => {});
@@ -37,29 +36,6 @@ function WalletBar() {
       setPendingConnect(false);
     }
   }, [pendingConnect, connected, connecting, connect]);
-
-  async function handleAirdrop() {
-    if (!publicKey) return;
-    setAirdropping(true);
-    try {
-      const res = await fetch("https://api.devnet.solana.com", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          jsonrpc: "2.0", id: 1,
-          method: "requestAirdrop",
-          params: [publicKey.toBase58(), 1_000_000_000],
-        }),
-      });
-      const data = await res.json();
-      if (data.error) throw new Error(data.error.message);
-      toast.success("1 SOL airdropped — may take a few seconds to confirm");
-    } catch (err: unknown) {
-      toast.error(`Airdrop failed: ${err instanceof Error ? err.message : "rate limited — try again later"}`);
-    } finally {
-      setAirdropping(false);
-    }
-  }
 
   function handleConnect() {
     if (connected) { disconnect(); return; }
@@ -90,11 +66,6 @@ function WalletBar() {
           </div>
         </div>
         <div className="flex items-center gap-2 flex-shrink-0">
-          {connected && (
-            <button onClick={handleAirdrop} disabled={airdropping} className="btn-ghost">
-              {airdropping ? "…" : "Airdrop 1 SOL"}
-            </button>
-          )}
           <button onClick={handleConnect} disabled={connecting} className={connected ? "btn-disconnect" : "btn-connect"}>
             {connecting ? "Connecting…" : connected ? "Disconnect" : "Connect Phantom"}
           </button>
@@ -217,6 +188,33 @@ export default function ZkPage() {
     if (obs) setBiomarkerName(obs.canonical_name.replace(/_/g, " ").replace(/\b\w/g, c => c.toUpperCase()));
   }
 
+  // Smart-suggest claims based on common reference ranges. Each suggestion picks
+  // the most recent matching observation and pre-fills the form.
+  type Suggestion = { canonical: string; label: string; mode: "below" | "above"; threshold: number };
+  const SUGGESTIONS: Suggestion[] = [
+    { canonical: "cholesterol",  label: "Cholesterol below 200",  mode: "below", threshold: 200 },
+    { canonical: "ldl",          label: "LDL below 130",          mode: "below", threshold: 130 },
+    { canonical: "hdl",          label: "HDL above 40",           mode: "above", threshold: 40  },
+    { canonical: "hba1c",        label: "HbA1c below 5.7",        mode: "below", threshold: 5.7 },
+    { canonical: "glucose",      label: "Glucose below 100",      mode: "below", threshold: 100 },
+    { canonical: "vitamin_d",    label: "Vitamin D above 30",     mode: "above", threshold: 30  },
+    { canonical: "ferritin",     label: "Ferritin above 30",      mode: "above", threshold: 30  },
+    { canonical: "tsh",          label: "TSH below 4.0",          mode: "below", threshold: 4.0 },
+    { canonical: "crp",          label: "CRP below 1.0",          mode: "below", threshold: 1.0 },
+  ];
+  const availableSuggestions = SUGGESTIONS.filter(s =>
+    observations.some(o => o.canonical_name === s.canonical)
+  );
+
+  function applySuggestion(s: Suggestion) {
+    const obs = observations.find(o => o.canonical_name === s.canonical);
+    if (!obs) return;
+    setSelectedObs(obs.obs_id);
+    setBiomarkerName(obs.canonical_name.replace(/_/g, " ").replace(/\b\w/g, c => c.toUpperCase()));
+    setProofMode(s.mode);
+    setThreshold(String(s.threshold));
+  }
+
   async function handleProve(e: React.FormEvent) {
     e.preventDefault();
     if (!selectedObs || !biomarkerName) return;
@@ -279,7 +277,20 @@ export default function ZkPage() {
             </p>
           </div>
         ) : (
-          <div className="card">
+          <div className="card space-y-4">
+            {availableSuggestions.length > 0 && (
+              <div>
+                <p className="form-label">Quick claims</p>
+                <div className="flex gap-2 flex-wrap">
+                  {availableSuggestions.map(s => (
+                    <button key={s.canonical + s.threshold} type="button"
+                      className="btn-mode" onClick={() => applySuggestion(s)}>
+                      {s.mode === "above" ? "↑" : "↓"} {s.label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
             <form onSubmit={handleProve} className="space-y-4">
               <div>
                 <label className="form-label">Lab observation</label>

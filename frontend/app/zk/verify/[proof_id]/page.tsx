@@ -7,13 +7,14 @@ const API = "http://127.0.0.1:8000";
 
 type VerifyResponse = {
   proof_id: string;
+  claim_type: "threshold_lt" | "threshold_gt" | "range";
   biomarker_name: string;
   threshold_display: string;
   passes: boolean;
   proof_valid: boolean;
   signature_valid: boolean;
   fully_verified: boolean;
-  date_int: number;
+  date_int?: number;
   solana_tx_id: string;
   created_at: string;
 };
@@ -43,6 +44,11 @@ export default function ProofVerifyPage({ params }: { params: Promise<{ proof_id
     ? `https://explorer.solana.com/tx/${result.solana_tx_id}?cluster=devnet`
     : null;
 
+  const [shareUrl, setShareUrl] = useState("");
+  useEffect(() => {
+    if (typeof window !== "undefined") setShareUrl(window.location.href);
+  }, []);
+
   return (
     <div className="space-y-6 cascade">
       <div>
@@ -68,15 +74,24 @@ export default function ProofVerifyPage({ params }: { params: Promise<{ proof_id
           <div className="card space-y-4">
             <div className="flex items-start justify-between gap-4">
               <div>
-                <p className="proof-name">{result.biomarker_name}</p>
+                <p className="proof-name">
+                  {result.biomarker_name}
+                  <span className="proof-threshold">
+                    {result.claim_type === "range"
+                      ? ` in ${result.threshold_display}`
+                      : ` ${result.threshold_display}`}
+                  </span>
+                </p>
                 <p className="proof-meta">
-                  {result.threshold_display}
-                  {dateStr ? ` · ${dateStr}` : ""}
-                  {` · #${result.proof_id.slice(0, 8)}`}
+                  {dateStr ? `${dateStr} · ` : ""}#{result.proof_id.slice(0, 8)}
                 </p>
               </div>
               <span className={result.passes ? "badge-passes" : "badge-fails"}>
-                {result.passes ? "✓ passes" : "✗ fails"}
+                {result.claim_type === "range"
+                  ? (result.passes ? "✓ in range" : "✗ out of range")
+                  : result.claim_type === "threshold_gt"
+                  ? (result.passes ? "✓ above" : "✗ not above")
+                  : (result.passes ? "✓ passes" : "✗ fails")}
               </span>
             </div>
 
@@ -86,7 +101,7 @@ export default function ProofVerifyPage({ params }: { params: Promise<{ proof_id
               </p>
               <div className="grid grid-cols-2 gap-x-4 gap-y-1">
                 <span className={result.proof_valid ? "verify-check-ok" : "verify-check-fail"}>
-                  {result.proof_valid ? "✓" : "✗"} Groth16 circuit proof
+                  {result.proof_valid ? "✓" : "✗"} {result.claim_type === "range" ? "Two Groth16 circuit proofs" : "Groth16 circuit proof"}
                 </span>
                 <span className={result.signature_valid ? "verify-check-ok" : "verify-check-fail"}>
                   {result.signature_valid ? "✓" : "✗"} Attestation signature
@@ -109,9 +124,35 @@ export default function ProofVerifyPage({ params }: { params: Promise<{ proof_id
             </div>
           </div>
 
+          <details className="how-details">
+            <summary className="how-summary">
+              <span className="how-arrow">▶</span> Share with QR code
+            </summary>
+            <div className="how-body flex items-center gap-4 flex-wrap">
+              {shareUrl && (
+                <img
+                  src={`https://api.qrserver.com/v1/create-qr-code/?data=${encodeURIComponent(shareUrl)}&size=180x180&margin=8&bgcolor=fefbf4`}
+                  alt="QR code linking to this verification page"
+                  width={180} height={180}
+                  className="rounded-md border border-[var(--rule-s)]"
+                />
+              )}
+              <div className="space-y-1.5 flex-1 min-w-[200px]">
+                <p className="stat-label">Open on a phone to verify in person</p>
+                <p className="text-xs break-all text-[var(--ink-3)] font-mono">{shareUrl}</p>
+                <button
+                  className="btn-ghost"
+                  onClick={() => { navigator.clipboard.writeText(shareUrl); toast.success("URL copied"); }}
+                >
+                  Copy URL
+                </button>
+              </div>
+            </div>
+          </details>
+
           <p className="page-subtitle">
-            Verification runs locally against this device&apos;s proof store.
-            For a portable shareable file, use the <Link href="/zk" className="solana-link">Export</Link> button.
+            Verification runs against this device&apos;s proof store.
+            For a portable file your provider can verify offline, use the <Link href="/zk" className="solana-link">Export</Link> button.
           </p>
         </>
       )}

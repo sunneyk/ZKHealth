@@ -131,6 +131,29 @@ async def chat(body: ChatRequest):
         raise HTTPException(status_code=500, detail=str(e)) from e
 
 
+@app.post("/api/insights")
+async def insights():
+    """Generate a structured AI summary of the user's health data — flags, trends, doctor questions."""
+    from llm import chat as llm_chat
+    context = database.get_all_content()
+    if not context.strip():
+        raise HTTPException(status_code=400, detail="No health data uploaded yet.")
+
+    prompt = (
+        "Generate a concise health summary in markdown with these sections:\n"
+        "**Highlights** — 2-4 bullets noting the most important observations\n"
+        "**Out of typical range** — bullets for any flagged values, with the value and direction (high/low)\n"
+        "**Trends** — bullets for any biomarkers with multiple readings, noting whether they're improving or worsening\n"
+        "**Questions for your doctor** — 3-5 specific questions worth raising at your next appointment\n\n"
+        "Keep it under 300 words. Do not diagnose. Do not prescribe. Do not give numerical reference ranges that aren't already in the data."
+    )
+    try:
+        reply = await asyncio.to_thread(llm_chat, prompt, context)
+        return {"summary": reply}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e)) from e
+
+
 # ── Observations ──────────────────────────────────────────────────────────────
 
 
@@ -568,65 +591,184 @@ def market_earnings():
     return {"total_lamports": total_lamports, "grant_count": len(grants)}
 
 
-# ── Wearable / Fitbit ────────────────────────────────────────────────────────
+# ── Demo seeding ─────────────────────────────────────────────────────────────
 
 
-@app.get("/api/wearable/fitbit/status")
-def fitbit_status():
-    from wearable import get_status
-    return get_status()
+_SAMPLE_WEARABLES = Path(__file__).parent.parent / "sample_data" / "sample_wearables.csv"
+
+# Three time-points per biomarker so the dashboard trend chart has data to plot.
+# Some values trend in/out of normal range to make the flags + chart visible.
+# Format: (canonical_name, [(date, value)], unit)
+_DEMO_LAB_PANEL: list[tuple[str, list[tuple[str, float]], str]] = [
+    ("hemoglobin",     [("2025-11-15", 13.8), ("2026-02-15", 14.0), ("2026-05-08", 14.2)], "g/dL"),
+    ("hematocrit",     [("2025-11-15", 41.0), ("2026-02-15", 41.8), ("2026-05-08", 42.5)], "%"),
+    ("rbc",            [("2025-11-15", 4.7),  ("2026-02-15", 4.75), ("2026-05-08", 4.8)],  "M/uL"),
+    ("wbc",            [("2025-11-15", 7.1),  ("2026-02-15", 6.9),  ("2026-05-08", 6.7)],  "K/uL"),
+    ("platelets",      [("2025-11-15", 232),  ("2026-02-15", 240),  ("2026-05-08", 245)],  "K/uL"),
+    ("glucose",        [("2025-11-15", 98),   ("2026-02-15", 95),   ("2026-05-08", 92)],   "mg/dL"),
+    ("hba1c",          [("2025-11-15", 5.6),  ("2026-02-15", 5.5),  ("2026-05-08", 5.4)],  "%"),
+    ("sodium",         [("2025-11-15", 139),  ("2026-02-15", 140),  ("2026-05-08", 140)],  "mmol/L"),
+    ("potassium",      [("2025-11-15", 4.1),  ("2026-02-15", 4.2),  ("2026-05-08", 4.2)],  "mmol/L"),
+    ("creatinine",     [("2025-11-15", 1.05), ("2026-02-15", 1.02), ("2026-05-08", 1.0)],  "mg/dL"),
+    # Cholesterol trending UP — out of range now
+    ("cholesterol",    [("2025-11-15", 198),  ("2026-02-15", 207),  ("2026-05-08", 215)],  "mg/dL"),
+    ("ldl",            [("2025-11-15", 128),  ("2026-02-15", 135),  ("2026-05-08", 142)],  "mg/dL"),
+    ("hdl",            [("2025-11-15", 52),   ("2026-02-15", 50),   ("2026-05-08", 48)],   "mg/dL"),
+    ("triglycerides",  [("2025-11-15", 110),  ("2026-02-15", 118),  ("2026-05-08", 124)],  "mg/dL"),
+    ("tsh",            [("2025-11-15", 2.3),  ("2026-02-15", 2.2),  ("2026-05-08", 2.1)],  "uIU/mL"),
+    # Ferritin trending DOWN
+    ("ferritin",       [("2025-11-15", 56),   ("2026-02-15", 47),   ("2026-05-08", 38)],   "ng/mL"),
+    # Vitamin D out of range (low) — improving with supplementation
+    ("vitamin_d",      [("2025-11-15", 18),   ("2026-02-15", 21),   ("2026-05-08", 24)],   "ng/mL"),
+    ("vitamin_b12",    [("2025-11-15", 460),  ("2026-02-15", 470),  ("2026-05-08", 480)],  "pg/mL"),
+    ("alt",            [("2025-11-15", 30),   ("2026-02-15", 29),   ("2026-05-08", 28)],   "U/L"),
+    ("ast",            [("2025-11-15", 24),   ("2026-02-15", 23),   ("2026-05-08", 22)],   "U/L"),
+    ("crp",            [("2025-11-15", 0.8),  ("2026-02-15", 0.7),  ("2026-05-08", 0.6)],  "mg/L"),
+    ("testosterone",   [("2025-11-15", 510),  ("2026-02-15", 525),  ("2026-05-08", 540)],  "ng/dL"),
+]
 
 
-@app.get("/api/wearable/fitbit/auth-url")
-def fitbit_auth_url():
-    from wearable import get_auth_url, _client_id
+@app.post("/api/demo/load")
+async def demo_load():
+    """Seed the database with a sample lab panel + wearable CSV. Idempotent — skips if demo data already loaded."""
+    from datetime import date as _date
+    from zk.attestation import attest_observation
+
+    # Skip if a demo lab doc is already in the DB
+    existing = database.get_documents()
+    already = any(d["filename"].startswith("demo_") for d in existing)
+    if already:
+        return {"already_loaded": True, "documents": len(existing)}
+
+    # Lab panel — one document per visit date so the dashboard groups by visit
+    lab_count = 0
+    visit_dates = sorted({d for _, readings, _ in _DEMO_LAB_PANEL for d, _ in readings})
+    visit_docs: dict[str, str] = {}
+    for v_date in visit_dates:
+        visit_docs[v_date] = database.save_document(
+            f"demo_bloodwork_{v_date}.pdf", "lab_pdf",
+            f"Comprehensive metabolic + lipid + vitamin panel — collected {v_date} (demo).",
+        )
+    for canonical, readings, unit in _DEMO_LAB_PANEL:
+        for d, value in readings:
+            obs_id = database.save_observation(visit_docs[d], canonical, value, unit, d)
+            payload = await asyncio.to_thread(attest_observation, obs_id, canonical, value, d)
+            database.save_attestation(obs_id, payload)
+            lab_count += 1
+
+    # Wearable CSV
+    wearable_count = 0
+    if _SAMPLE_WEARABLES.exists():
+        from ingest import parse_wearable_csv
+        with open(_SAMPLE_WEARABLES, "rb") as f:
+            file_bytes = f.read()
+        summary, rows = parse_wearable_csv(file_bytes)
+        wearable_doc_id = database.save_document("demo_wearables.csv", "wearable_csv", summary)
+        units = {
+            "steps": "steps", "heart_rate_avg": "bpm", "heart_rate_resting": "bpm",
+            "sleep_hours": "h", "hrv": "ms", "spo2": "%", "calories_burned": "kcal",
+            "active_minutes": "min",
+        }
+        for row in rows:
+            d = row.get("date", "")
+            for col, unit in units.items():
+                if col not in row:
+                    continue
+                try:
+                    val = float(row[col])
+                except (ValueError, TypeError):
+                    continue
+                obs_id = database.save_observation(wearable_doc_id, col, val, unit, d)
+                payload = await asyncio.to_thread(attest_observation, obs_id, col, val, d)
+                database.save_attestation(obs_id, payload)
+                wearable_count += 1
+
+    return {
+        "already_loaded": False,
+        "lab_observations": lab_count,
+        "wearable_observations": wearable_count,
+    }
+
+
+# ── Wearable providers (Fitbit, WHOOP, Oura) ────────────────────────────────
+
+
+def _wearable_callback_html(label: str, ok: bool, message: str = "") -> HTMLResponse:
+    if ok:
+        body = f"""
+  <p style="font-size:2.5rem;margin:0">✓</p>
+  <h2 style="margin:.5rem 0 1rem;font-weight:500">{label} connected</h2>
+  <p style="color:#888">Close this tab and return to ZKHealth to sync your data.</p>
+  <script>setTimeout(()=>window.close(),1500)</script>"""
+    else:
+        body = f"""
+  <p style="font-size:2.5rem;margin:0;color:#ef6b5e">✗</p>
+  <h2 style="margin:.5rem 0 1rem;font-weight:500">Connection failed</h2>
+  <p style="color:#888">{message}</p>"""
+    return HTMLResponse(f"""<html><head><title>{label}</title></head>
+<body style="font-family:sans-serif;text-align:center;padding:4rem;background:#0a0a0a;color:#e5e5e5">{body}</body></html>""",
+        status_code=200 if ok else 400,
+    )
+
+
+@app.get("/api/wearable/list")
+def wearable_list():
+    import wearable
+    return wearable.list_status()
+
+
+@app.get("/api/wearable/{provider}/status")
+def wearable_status(provider: str):
+    import wearable
     try:
-        _client_id()  # will raise if not configured
+        return wearable.get(provider).get_status()
+    except KeyError as e:
+        raise HTTPException(status_code=404, detail=str(e)) from e
+
+
+@app.get("/api/wearable/{provider}/auth-url")
+def wearable_auth_url(provider: str):
+    import wearable
+    try:
+        mod = wearable.get(provider)
+    except KeyError as e:
+        raise HTTPException(status_code=404, detail=str(e)) from e
+    try:
+        return {"url": mod.get_auth_url()}
     except RuntimeError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
-    return {"url": get_auth_url()}
 
 
-@app.get("/api/wearable/fitbit/callback")
-async def fitbit_callback(code: str = "", state: str = "", error: str = ""):
+@app.get("/api/wearable/{provider}/callback")
+async def wearable_callback(provider: str, code: str = "", state: str = "", error: str = ""):
+    import wearable
+    try:
+        mod = wearable.get(provider)
+    except KeyError as e:
+        raise HTTPException(status_code=404, detail=str(e)) from e
+    label = mod.LABEL
     if error:
-        return HTMLResponse(
-            f"<html><body style='font-family:sans-serif;text-align:center;padding:3rem'>"
-            f"<h2>Fitbit error</h2><p>{error}</p></body></html>",
-            status_code=400,
-        )
+        return _wearable_callback_html(label, ok=False, message=error)
     try:
-        from wearable import exchange_code
-        await asyncio.to_thread(exchange_code, code, state)
+        await asyncio.to_thread(mod.exchange_code, code, state)
     except Exception as exc:
-        return HTMLResponse(
-            f"<html><body style='font-family:sans-serif;text-align:center;padding:3rem'>"
-            f"<h2>Connection failed</h2><p>{exc}</p></body></html>",
-            status_code=400,
-        )
-    return HTMLResponse("""
-<html>
-<head><title>Fitbit Connected</title></head>
-<body style="font-family:sans-serif;text-align:center;padding:4rem;background:#0a0a0a;color:#e5e5e5">
-  <p style="font-size:2.5rem;margin:0">✓</p>
-  <h2 style="margin:.5rem 0 1rem;font-weight:500">Fitbit connected</h2>
-  <p style="color:#888">Close this tab and return to ZKHealth to sync your data.</p>
-  <script>setTimeout(()=>window.close(),1500)</script>
-</body>
-</html>
-""")
+        return _wearable_callback_html(label, ok=False, message=str(exc))
+    return _wearable_callback_html(label, ok=True)
 
 
-@app.post("/api/wearable/fitbit/sync")
-async def fitbit_sync():
-    from wearable import sync_data
+@app.post("/api/wearable/{provider}/sync")
+async def wearable_sync(provider: str):
+    import wearable
     try:
-        result = await asyncio.to_thread(sync_data)
+        mod = wearable.get(provider)
+    except KeyError as e:
+        raise HTTPException(status_code=404, detail=str(e)) from e
+    try:
+        return await asyncio.to_thread(mod.sync_data)
     except RuntimeError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e)) from e
-    return result
 
 
 if __name__ == "__main__":
