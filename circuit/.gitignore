@@ -1,0 +1,4 @@
+*.sym
+pot*.ptau
+*_0000.zkey
+compute_commitment*.mjs
