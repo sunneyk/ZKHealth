@@ -3,3 +3,5 @@ uvicorn[standard]
 pdfplumber
 python-multipart
 defusedxml
+anthropic
+httpx

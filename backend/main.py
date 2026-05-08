@@ -6,11 +6,12 @@ import hashlib
 import json
 import subprocess
 import sys
+import uuid
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import Response
+from fastapi.responses import HTMLResponse, RedirectResponse, Response
 from pydantic import BaseModel, Field
 
 sys.path.insert(0, str(Path(__file__).parent))
@@ -25,7 +26,8 @@ app = FastAPI(title="ZKHealth Demo")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://localhost:3000", "http://127.0.0.1:3000",
-                   "http://localhost:3001", "http://127.0.0.1:3001"],
+                   "http://localhost:3001", "http://127.0.0.1:3001",
+                   "http://localhost:3002", "http://127.0.0.1:3002"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -119,7 +121,7 @@ class ChatRequest(BaseModel):
 
 @app.post("/api/chat")
 async def chat(body: ChatRequest):
-    """Send a message to Claude with all uploaded health data as context."""
+    """Send a message to the AI with all uploaded health data as context."""
     from llm import chat as llm_chat
     context = database.get_all_content()
     try:
@@ -155,12 +157,16 @@ class ProveRequest(BaseModel):
     obs_id: str
     threshold: float = Field(gt=0)
     biomarker_name: str
+    direction: str = "below"   # "below" | "above"
     anchor_on_chain: bool = False
 
 
 @app.post("/api/zk/prove")
 async def prove(body: ProveRequest):
     from zk.prover import generate_proof
+
+    if body.direction not in ("below", "above"):
+        raise HTTPException(status_code=422, detail="direction must be 'below' or 'above'")
 
     att = database.get_attestation(body.obs_id)
     if att is None:
@@ -171,13 +177,19 @@ async def prove(body: ProveRequest):
     except RuntimeError as e:
         raise HTTPException(status_code=500, detail=str(e)) from e
 
+    # For "above": the circuit proves value < threshold; passes=0 means value >= threshold
+    claim_passes = result["passes"] if body.direction == "below" else not result["passes"]
+    claim_type = "threshold_lt" if body.direction == "below" else "threshold_gt"
+    threshold_display = f"{'below' if body.direction == 'below' else 'above'} {body.threshold:g}"
+
     database.save_proof(
         result["proof_id"],
         att["attestation_id"],
         result["biomarker_name"],
-        result["threshold_display"],
-        result["passes"],
+        threshold_display,
+        claim_passes,
         {k: result[k] for k in ("proof", "public_signals", "signature", "commitment")},
+        claim_type=claim_type,
     )
 
     tx_id = ""
@@ -186,15 +198,91 @@ async def prove(body: ProveRequest):
             from chain.solana_anchor import anchor_proof
             tx_id = await anchor_proof(result["proof"], result["public_signals"])
             database.update_proof_tx(result["proof_id"], tx_id)
-        except Exception as exc:
-            pass  # anchoring is non-fatal
+        except Exception:
+            pass
 
     return {
         "proof_id": result["proof_id"],
-        "passes": result["passes"],
+        "passes": claim_passes,
         "threshold": body.threshold,
+        "direction": body.direction,
         "biomarker_name": body.biomarker_name,
         "date_int": result["date_int"],
+        "solana_tx_id": tx_id,
+    }
+
+
+# ── ZK Range Prove ────────────────────────────────────────────────────────────
+
+
+class ProveRangeRequest(BaseModel):
+    obs_id: str
+    threshold_low: float = Field(gt=0)
+    threshold_high: float = Field(gt=0)
+    biomarker_name: str
+    anchor_on_chain: bool = False
+
+
+@app.post("/api/zk/prove_range")
+async def prove_range(body: ProveRangeRequest):
+    """Generate two Groth16 proofs forming a range claim: low < value < high."""
+    from zk.prover import generate_proof
+
+    if body.threshold_low >= body.threshold_high:
+        raise HTTPException(status_code=422, detail="threshold_low must be less than threshold_high")
+
+    att = database.get_attestation(body.obs_id)
+    if att is None:
+        raise HTTPException(status_code=404, detail="No attestation found for this observation.")
+
+    # Proof A: value < high  (should pass for a value in range)
+    # Proof B: value < low   (should fail  for a value in range)
+    try:
+        result_high, result_low = await asyncio.gather(
+            asyncio.to_thread(generate_proof, att, body.threshold_high, body.biomarker_name),
+            asyncio.to_thread(generate_proof, att, body.threshold_low, body.biomarker_name),
+        )
+    except RuntimeError as e:
+        raise HTTPException(status_code=500, detail=str(e)) from e
+
+    in_range = result_high["passes"] and not result_low["passes"]
+    proof_id = uuid.uuid4().hex
+    threshold_display = f"{body.threshold_low}–{body.threshold_high}"
+
+    payload = {
+        "proof_high": result_high["proof"],
+        "public_signals_high": result_high["public_signals"],
+        "proof_low": result_low["proof"],
+        "public_signals_low": result_low["public_signals"],
+        "signature": att["signature"],
+        "commitment": att["commitment"],
+    }
+
+    database.save_proof(
+        proof_id,
+        att["attestation_id"],
+        body.biomarker_name,
+        threshold_display,
+        in_range,
+        payload,
+        claim_type="range",
+    )
+
+    tx_id = ""
+    if body.anchor_on_chain:
+        try:
+            from chain.solana_anchor import anchor_proof
+            tx_id = await anchor_proof(result_high["proof"], result_high["public_signals"])
+            database.update_proof_tx(proof_id, tx_id)
+        except Exception:
+            pass
+
+    return {
+        "proof_id": proof_id,
+        "in_range": in_range,
+        "threshold_low": body.threshold_low,
+        "threshold_high": body.threshold_high,
+        "biomarker_name": body.biomarker_name,
         "solana_tx_id": tx_id,
     }
 
@@ -211,12 +299,32 @@ async def verify(proof_id: str):
         raise HTTPException(status_code=404, detail="Proof not found.")
 
     payload = row["payload"]
+    claim_type = row.get("claim_type", "threshold_lt")
+
+    if claim_type == "range":
+        high_valid = await asyncio.to_thread(verify_proof, payload["proof_high"], payload["public_signals_high"])
+        low_valid = await asyncio.to_thread(verify_proof, payload["proof_low"], payload["public_signals_low"])
+        sig_valid = verify_signature(payload["commitment"], payload["signature"])
+        proof_valid = high_valid and low_valid
+        return {
+            "proof_id": proof_id,
+            "claim_type": "range",
+            "biomarker_name": row["biomarker_name"],
+            "threshold_display": row["threshold_display"],
+            "passes": bool(row["passes"]),
+            "proof_valid": proof_valid,
+            "signature_valid": sig_valid,
+            "fully_verified": proof_valid and sig_valid,
+            "solana_tx_id": row["solana_tx_id"],
+            "created_at": row["created_at"],
+        }
+
     proof_valid = await asyncio.to_thread(verify_proof, payload["proof"], payload["public_signals"])
     sig_valid = verify_signature(payload["commitment"], payload["signature"])
-
     sigs = payload["public_signals"]
     return {
         "proof_id": proof_id,
+        "claim_type": claim_type,
         "biomarker_name": row["biomarker_name"],
         "threshold_display": row["threshold_display"],
         "passes": bool(row["passes"]),
@@ -458,6 +566,67 @@ def market_earnings():
     grants = database.get_grants()
     total_lamports = sum(g["lamports_received"] for g in grants)
     return {"total_lamports": total_lamports, "grant_count": len(grants)}
+
+
+# ── Wearable / Fitbit ────────────────────────────────────────────────────────
+
+
+@app.get("/api/wearable/fitbit/status")
+def fitbit_status():
+    from wearable import get_status
+    return get_status()
+
+
+@app.get("/api/wearable/fitbit/auth-url")
+def fitbit_auth_url():
+    from wearable import get_auth_url, _client_id
+    try:
+        _client_id()  # will raise if not configured
+    except RuntimeError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    return {"url": get_auth_url()}
+
+
+@app.get("/api/wearable/fitbit/callback")
+async def fitbit_callback(code: str = "", state: str = "", error: str = ""):
+    if error:
+        return HTMLResponse(
+            f"<html><body style='font-family:sans-serif;text-align:center;padding:3rem'>"
+            f"<h2>Fitbit error</h2><p>{error}</p></body></html>",
+            status_code=400,
+        )
+    try:
+        from wearable import exchange_code
+        await asyncio.to_thread(exchange_code, code, state)
+    except Exception as exc:
+        return HTMLResponse(
+            f"<html><body style='font-family:sans-serif;text-align:center;padding:3rem'>"
+            f"<h2>Connection failed</h2><p>{exc}</p></body></html>",
+            status_code=400,
+        )
+    return HTMLResponse("""
+<html>
+<head><title>Fitbit Connected</title></head>
+<body style="font-family:sans-serif;text-align:center;padding:4rem;background:#0a0a0a;color:#e5e5e5">
+  <p style="font-size:2.5rem;margin:0">✓</p>
+  <h2 style="margin:.5rem 0 1rem;font-weight:500">Fitbit connected</h2>
+  <p style="color:#888">Close this tab and return to ZKHealth to sync your data.</p>
+  <script>setTimeout(()=>window.close(),1500)</script>
+</body>
+</html>
+""")
+
+
+@app.post("/api/wearable/fitbit/sync")
+async def fitbit_sync():
+    from wearable import sync_data
+    try:
+        result = await asyncio.to_thread(sync_data)
+    except RuntimeError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e)) from e
+    return result
 
 
 if __name__ == "__main__":

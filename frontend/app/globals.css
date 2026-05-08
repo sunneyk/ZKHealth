@@ -948,3 +948,43 @@ input::placeholder, textarea::placeholder { color: var(--ink-4); }
   color: var(--ochre);
   line-height: 1.4;
 }
+
+/* ── ZK proof type toggle ─────────────────────────────────── */
+.btn-mode {
+  padding: 5px 12px;
+  font-size: 12px;
+  font-weight: 500;
+  border-radius: var(--r-md);
+  border: 0.5px solid var(--rule-s);
+  background: transparent;
+  color: var(--ink-3);
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s;
+}
+.btn-mode:hover { background: var(--hover); color: var(--ink); }
+.btn-mode-active {
+  padding: 5px 12px;
+  font-size: 12px;
+  font-weight: 500;
+  border-radius: var(--r-md);
+  border: 0.5px solid var(--brand-lo);
+  background: var(--brand-wash);
+  color: var(--brand-ink);
+  cursor: pointer;
+}
+
+.proof-type-badge {
+  display: inline-block;
+  margin-left: 6px;
+  padding: 1px 6px;
+  font-size: 9px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  border-radius: var(--r-pill);
+  background: var(--plum-wash);
+  color: var(--plum-ink);
+  border: 0.5px solid var(--plum);
+  opacity: 0.8;
+  vertical-align: middle;
+}

@@ -1,6 +1,9 @@
 "use client";
 import { useState, useEffect, useMemo, useCallback } from "react";
 import { toast } from "sonner";
+import {
+  LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer, ReferenceLine, ReferenceArea,
+} from "recharts";
 
 const API = "http://127.0.0.1:8000";
 
@@ -132,6 +135,60 @@ function fmtRef(lo?: number, hi?: number): string {
   return "—";
 }
 
+// ── Trend chart ──────────────────────────────────────────────────
+function TrendChart({ entry, colSpan }: { entry: LabEntry; colSpan: number }) {
+  const data = useMemo(() =>
+    [...entry.history]
+      .filter(h => h.date_effective)
+      .sort((a, b) => a.date_effective.localeCompare(b.date_effective))
+      .map(h => ({ date: h.date_effective.slice(0, 10), value: h.value })),
+    [entry.history]
+  );
+
+  if (data.length < 2) return null;
+
+  const values = data.map(d => d.value);
+  const { refLow, refHigh } = entry;
+  const domainMin = Math.min(...values, refLow ?? Infinity) * 0.92;
+  const domainMax = Math.max(...values, refHigh ?? -Infinity) * 1.08;
+
+  return (
+    <tr>
+      <td colSpan={colSpan} className="px-4 pb-4 pt-1">
+        <p className="text-[10px] text-[var(--ink-3)] mb-1.5 font-medium tracking-wide uppercase">Trend</p>
+        <ResponsiveContainer width="100%" height={110}>
+          <LineChart data={data} margin={{ top: 4, right: 8, left: -20, bottom: 0 }}>
+            {refLow != null && refHigh != null && (
+              <ReferenceArea y1={refLow} y2={refHigh} fill="var(--range-ok)" ifOverflow="extendDomain" />
+            )}
+            {refLow != null && (
+              <ReferenceLine y={refLow} stroke="var(--sage)" strokeDasharray="3 3" strokeOpacity={0.5} />
+            )}
+            {refHigh != null && (
+              <ReferenceLine y={refHigh} stroke="var(--sage)" strokeDasharray="3 3" strokeOpacity={0.5} />
+            )}
+            <XAxis dataKey="date" tick={{ fontSize: 10, fill: "var(--ink-3)" }} tickLine={false} axisLine={false} />
+            <YAxis domain={[domainMin, domainMax]} tick={{ fontSize: 10, fill: "var(--ink-3)" }} tickLine={false} axisLine={false} width={48} />
+            <Tooltip
+              contentStyle={{ background: "var(--paper-card)", border: "1px solid var(--rule-s)", borderRadius: 6, fontSize: 12 }}
+              itemStyle={{ color: "var(--ink)" }}
+              labelStyle={{ color: "var(--ink-3)" }}
+            />
+            <Line
+              type="monotone"
+              dataKey="value"
+              stroke="var(--brand)"
+              strokeWidth={1.5}
+              dot={{ r: 3, fill: "var(--brand)", strokeWidth: 0 }}
+              activeDot={{ r: 4 }}
+            />
+          </LineChart>
+        </ResponsiveContainer>
+      </td>
+    </tr>
+  );
+}
+
 // ── Range bar ────────────────────────────────────────────────────
 function RangeBar({ value, refLow, refHigh, flag }: { value: number; refLow?: number; refHigh?: number; flag: Flag }) {
   if (refLow == null || refHigh == null) return <span className="lab-range-none">—</span>;
@@ -191,6 +248,7 @@ function SourceRow({ doc, onDelete }: { doc: Doc; onDelete: (id: string) => void
 function LabRow({ entry, isWearable }: { entry: LabEntry; isWearable: boolean }) {
   const [expanded, setExpanded] = useState(false);
   const hasHistory = entry.history.length > 1;
+  const colSpan = isWearable ? 3 : 6;
 
   return (
     <>
@@ -235,6 +293,7 @@ function LabRow({ entry, isWearable }: { entry: LabEntry; isWearable: boolean })
           <td className="lab-td lab-td-date">{h.date_effective || "—"}</td>
         </tr>
       ))}
+      {expanded && <TrendChart entry={entry} colSpan={colSpan} />}
     </>
   );
 }

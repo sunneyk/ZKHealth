@@ -33,6 +33,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
                 <Link href="/dashboard" className="nav-link">Dashboard</Link>
                 <Link href="/zk" className="nav-link">ZK Proofs</Link>
                 <Link href="/market" className="nav-link">Market</Link>
+                <Link href="/wearable" className="nav-link">Wearable</Link>
               </nav>
             </div>
             <div className="flex items-center gap-3">

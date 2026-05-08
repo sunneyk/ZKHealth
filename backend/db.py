@@ -187,13 +187,14 @@ def get_attestation(obs_id: str) -> dict | None:
 
 
 def save_proof(proof_id: str, attestation_id: str, biomarker_name: str,
-               threshold_display: str, passes: bool, payload: dict) -> None:
+               threshold_display: str, passes: bool, payload: dict,
+               claim_type: str = "threshold_lt") -> None:
     conn = get_conn()
     conn.execute(
         """INSERT INTO zk_proofs
-           (proof_id, attestation_id, biomarker_name, threshold_display, passes, payload)
-           VALUES (?,?,?,?,?,?)""",
-        (proof_id, attestation_id, biomarker_name, threshold_display, int(passes), json.dumps(payload)),
+           (proof_id, attestation_id, biomarker_name, claim_type, threshold_display, passes, payload)
+           VALUES (?,?,?,?,?,?,?)""",
+        (proof_id, attestation_id, biomarker_name, claim_type, threshold_display, int(passes), json.dumps(payload)),
     )
     conn.commit()
     conn.close()
@@ -209,7 +210,7 @@ def update_proof_tx(proof_id: str, tx_id: str) -> None:
 def get_proofs() -> list[dict]:
     conn = get_conn()
     rows = conn.execute(
-        "SELECT proof_id, biomarker_name, threshold_display, passes, solana_tx_id, created_at FROM zk_proofs ORDER BY created_at DESC"
+        "SELECT proof_id, biomarker_name, claim_type, threshold_display, passes, solana_tx_id, created_at FROM zk_proofs ORDER BY created_at DESC"
     ).fetchall()
     conn.close()
     return [dict(r) for r in rows]

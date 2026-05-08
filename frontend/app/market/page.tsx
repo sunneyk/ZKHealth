@@ -383,7 +383,7 @@ export default function MarketPage() {
                     )}
                   </div>
                   <p className="stat-label">
-                    Price: 0.001 SOL · <span className="wallet-saved">≈ $0.14 (devnet demo)</span>
+                    Price: 0.001 SOL · <span className="wallet-saved">≈ $0.14 (devnet demo)</span> · <span className="wallet-saved">ε-DP ε=1.0</span>
                   </p>
                   {!connected && (
                     <p className="market-warning">
@@ -412,7 +412,7 @@ export default function MarketPage() {
                   <thead>
                     <tr>
                       <th className="preview-th">Biomarker</th>
-                      <th className="preview-th">Value (±5% noise)</th>
+                      <th className="preview-th">Value (ε-DP, ε=1.0)</th>
                       <th className="preview-th">Unit</th>
                       <th className="preview-th">Readings</th>
                     </tr>
@@ -457,7 +457,7 @@ export default function MarketPage() {
             <strong className="how-strong">Step 3 — Verify.</strong> The backend calls Solana devnet RPC to confirm the on-chain transfer before releasing any data. Payment verification is atomic — no data is released unless the transaction is confirmed.
           </p>
           <p>
-            <strong className="how-strong">Step 4 — Anonymize.</strong> Values are aggregated across all readings and ±5% uniform noise is added before release. No dates, IDs, or raw values are shared.
+            <strong className="how-strong">Step 4 — Anonymize.</strong> Values are aggregated across all readings and Laplace noise calibrated to ε = 1.0 differential privacy is added before release. No dates, IDs, or raw values are shared.
           </p>
         </div>
       </details>
