@@ -20,19 +20,19 @@ _SCOPES = "read:recovery read:cycles read:sleep read:profile offline"
 
 
 def _client_id() -> str:
-    return c.env_required("WHOOP_CLIENT_ID", "WHOOP client ID")
+    return c.cred_required(PROVIDER, "client_id", "WHOOP client ID")
 
 
 def _client_secret() -> str:
-    return c.env_required("WHOOP_CLIENT_SECRET", "WHOOP client secret")
+    return c.cred_required(PROVIDER, "client_secret", "WHOOP client secret")
 
 
 def _redirect_uri() -> str:
-    return c.env_optional("WHOOP_REDIRECT_URI", "http://localhost:8000/api/wearable/whoop/callback")
+    return c.cred_get(PROVIDER, "redirect_uri") or "http://localhost:8000/api/wearable/whoop/callback"
 
 
 def is_configured() -> bool:
-    return bool(c.env_optional("WHOOP_CLIENT_ID"))
+    return bool(c.cred_get(PROVIDER, "client_id"))
 
 
 def get_status() -> dict:
@@ -91,28 +91,30 @@ def sync_data(days: int = 7) -> dict:
     }
 
     doc_id = c.begin_sync_doc(PROVIDER, LABEL, s, e)
-    count = 0
+    specs: list[dict] = []
+
+    def _add(date_str, canonical, value, unit):
+        spec = c.save_obs_pending(doc_id, canonical, value, unit, date_str)
+        if spec:
+            specs.append(spec)
 
     with httpx.Client(base_url=_API_BASE, timeout=15.0) as client:
-        # Recovery — score, HRV (rmssd), resting heart rate
         r = client.get("/v1/recovery", headers=headers, params=range_params)
         if r.is_success:
             for rec in r.json().get("records", []):
                 d = _date_only(rec.get("created_at", ""))
                 score = rec.get("score") or {}
-                count += c.save_synced_observation(doc_id, "recovery_score", score.get("recovery_score"), "%", d)
-                count += c.save_synced_observation(doc_id, "hrv", score.get("hrv_rmssd_milli"), "ms", d)
-                count += c.save_synced_observation(doc_id, "resting_heart_rate", score.get("resting_heart_rate"), "bpm", d)
+                _add(d, "recovery_score", score.get("recovery_score"), "%")
+                _add(d, "hrv", score.get("hrv_rmssd_milli"), "ms")
+                _add(d, "resting_heart_rate", score.get("resting_heart_rate"), "bpm")
 
-        # Cycles — daily strain
         r = client.get("/v1/cycle", headers=headers, params=range_params)
         if r.is_success:
             for cyc in r.json().get("records", []):
                 d = _date_only(cyc.get("start", ""))
                 score = cyc.get("score") or {}
-                count += c.save_synced_observation(doc_id, "strain_score", score.get("strain"), "score", d)
+                _add(d, "strain_score", score.get("strain"), "score")
 
-        # Sleep — duration + efficiency
         r = client.get("/v1/activity/sleep", headers=headers, params=range_params)
         if r.is_success:
             for sleep in r.json().get("records", []):
@@ -124,7 +126,7 @@ def sync_data(days: int = 7) -> dict:
                 total_ms = stage.get("total_in_bed_time_milli") or 0
                 awake_ms = stage.get("total_awake_time_milli") or 0
                 asleep_hours = max(0.0, (total_ms - awake_ms) / 3_600_000)
-                count += c.save_synced_observation(doc_id, "sleep_hours", round(asleep_hours, 2), "h", d)
-                count += c.save_synced_observation(doc_id, "sleep_efficiency", score.get("sleep_efficiency_percentage"), "%", d)
+                _add(d, "sleep_hours", round(asleep_hours, 2), "h")
+                _add(d, "sleep_efficiency", score.get("sleep_efficiency_percentage"), "%")
 
-    return c.finalize_sync(PROVIDER, e, doc_id, count, s)
+    return c.finalize_sync(PROVIDER, e, doc_id, specs, s)

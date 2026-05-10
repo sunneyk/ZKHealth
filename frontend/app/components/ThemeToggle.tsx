@@ -1,14 +1,15 @@
 "use client";
-import { useEffect, useState } from "react";
+import { useState } from "react";
+
+function readInitialTheme(): "dark" | "light" {
+  if (typeof window === "undefined") return "dark";
+  const stored = window.localStorage.getItem("zkhealth-theme") as "dark" | "light" | null;
+  if (stored) return stored;
+  return window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+}
 
 export function ThemeToggle() {
-  const [theme, setTheme] = useState<"dark" | "light">("dark");
-
-  useEffect(() => {
-    const stored = localStorage.getItem("zkhealth-theme") as "dark" | "light" | null;
-    const preferred = window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
-    setTheme(stored ?? preferred);
-  }, []);
+  const [theme, setTheme] = useState<"dark" | "light">(readInitialTheme);
 
   function toggle() {
     const next = theme === "dark" ? "light" : "dark";

@@ -21,6 +21,8 @@ frontend/.next/
 
 # Solana keypair — never commit private keys
 id.json
+backend/chain/treasury.json
+backend/chain/node_modules/
 
 # Editor / agent state
 .claude/

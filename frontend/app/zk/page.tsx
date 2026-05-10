@@ -1,79 +1,12 @@
 "use client";
 import { useState, useEffect } from "react";
-import { useWallet } from "@solana/wallet-adapter-react";
 import { toast } from "sonner";
-import Link from "next/link";
 
 const API = "http://127.0.0.1:8000";
 
 type Observation = { obs_id: string; canonical_name: string; value: number; unit: string; date_effective: string };
 type Proof = { proof_id: string; biomarker_name: string; claim_type: string; threshold_display: string; passes: number; solana_tx_id: string; created_at: string };
 type VerifyResult = { proof_valid: boolean; signature_valid: boolean; fully_verified: boolean; passes: boolean; claim_type?: string };
-
-function WalletBar() {
-  const { publicKey, connected, connecting, connect, disconnect, select, wallets } = useWallet();
-  const [savedKey, setSavedKey] = useState("");
-  const [pendingConnect, setPendingConnect] = useState(false);
-
-  useEffect(() => {
-    fetch(`${API}/api/zk/wallet`).then(r => r.json()).then(d => setSavedKey(d.pubkey || "")).catch(() => {});
-  }, []);
-
-  useEffect(() => {
-    if (connected && publicKey) {
-      const key = publicKey.toBase58();
-      fetch(`${API}/api/zk/wallet`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ pubkey: key }),
-      }).then(() => setSavedKey(key)).catch(() => {});
-    }
-  }, [connected, publicKey]);
-
-  useEffect(() => {
-    if (pendingConnect && !connected && !connecting) {
-      connect().catch(() => toast.error("Phantom not found — install from phantom.app"));
-      setPendingConnect(false);
-    }
-  }, [pendingConnect, connected, connecting, connect]);
-
-  function handleConnect() {
-    if (connected) { disconnect(); return; }
-    const phantom = wallets.find(w => w.adapter.name === "Phantom");
-    if (!phantom) { toast.error("Phantom not found — install from phantom.app"); return; }
-    select(phantom.adapter.name);
-    setPendingConnect(true);
-  }
-
-  const displayKey = connected && publicKey ? publicKey.toBase58() : null;
-
-  return (
-    <div className="card">
-      <div className="flex items-center justify-between gap-4">
-        <div className="flex items-center gap-3 min-w-0">
-          <div className="wallet-icon"><span className="text-sm">◎</span></div>
-          <div className="min-w-0">
-            <p className="section-label">Solana Wallet</p>
-            {displayKey ? (
-              <div className="flex items-center gap-1.5 mt-0.5">
-                <p className="wallet-key truncate">{displayKey.slice(0, 8)}…{displayKey.slice(-6)}</p>
-                <button className="copy-btn" onClick={() => { navigator.clipboard.writeText(displayKey); toast.success("Copied"); }} title="Copy">⧉</button>
-              </div>
-            ) : savedKey
-              ? <p className="wallet-saved mt-0.5 truncate">Saved: {savedKey.slice(0, 8)}…</p>
-              : <p className="wallet-none mt-0.5">Not connected</p>
-            }
-          </div>
-        </div>
-        <div className="flex items-center gap-2 flex-shrink-0">
-          <button onClick={handleConnect} disabled={connecting} className={connected ? "btn-disconnect" : "btn-connect"}>
-            {connecting ? "Connecting…" : connected ? "Disconnect" : "Connect Phantom"}
-          </button>
-        </div>
-      </div>
-    </div>
-  );
-}
 
 function ProofRow({ proof }: { proof: Proof }) {
   const [vr, setVr] = useState<VerifyResult | null>(null);
@@ -120,7 +53,17 @@ function ProofRow({ proof }: { proof: Proof }) {
             </span>
             {isRange && <span className="proof-type-badge">range</span>}
           </p>
-          <p className="proof-meta">{proof.created_at.slice(0, 10)} · #{proof.proof_id.slice(0, 8)}</p>
+          <p className="proof-meta">
+            {proof.created_at.slice(0, 10)} · #{proof.proof_id.slice(0, 8)}
+            {explorerUrl && (
+              <>
+                {" · "}
+                <a href={explorerUrl} target="_blank" rel="noopener noreferrer" className="proof-chain-link">
+                  ⛓ View on-chain ↗
+                </a>
+              </>
+            )}
+          </p>
         </div>
         <div className="flex items-center gap-2 flex-shrink-0 flex-wrap justify-end">
           <span className={proof.passes ? "badge-passes" : "badge-fails"}>
@@ -130,20 +73,12 @@ function ProofRow({ proof }: { proof: Proof }) {
               ? (proof.passes ? "✓ above" : "✗ not above")
               : (proof.passes ? "✓ passes" : "✗ fails")}
           </span>
-          {explorerUrl && (
-            <a href={explorerUrl} target="_blank" rel="noopener noreferrer" className="solana-link">Solana ↗</a>
-          )}
           <button onClick={() => { navigator.clipboard.writeText(proof.proof_id); toast.success("Proof ID copied"); }} className="btn-ghost">
             Copy ID
           </button>
-          <Link href={`/zk/verify/${proof.proof_id}`} className="btn-ghost">
-            Share
-          </Link>
-          {!isRange && !isAbove && (
-            <button onClick={handleExport} disabled={downloading} className="btn-ghost">
-              {downloading ? "…" : "Export"}
-            </button>
-          )}
+          <button onClick={handleExport} disabled={downloading} className="btn-ghost">
+            {downloading ? "…" : "Export"}
+          </button>
           <button onClick={handleVerify} disabled={verifying} className="btn-verify">
             {verifying ? "…" : "Verify"}
           </button>
@@ -159,6 +94,11 @@ function ProofRow({ proof }: { proof: Proof }) {
             <span className={vr.proof_valid ? "verify-check-ok" : "verify-check-fail"}>{vr.proof_valid ? "✓" : "✗"} Circuit proof</span>
             <span className={vr.signature_valid ? "verify-check-ok" : "verify-check-fail"}>{vr.signature_valid ? "✓" : "✗"} Attestation</span>
           </div>
+          {explorerUrl && (
+            <a href={explorerUrl} target="_blank" rel="noopener noreferrer" className="proof-chain-link block pt-1">
+              ⛓ View on-chain anchor on Solana Explorer ↗
+            </a>
+          )}
         </div>
       )}
     </div>
@@ -176,6 +116,7 @@ export default function ZkPage() {
   const [biomarkerName, setBiomarkerName] = useState("");
   const [anchorOnChain, setAnchorOnChain] = useState(true);
   const [proving, setProving] = useState(false);
+  const [showAllSuggestions, setShowAllSuggestions] = useState(false);
 
   useEffect(() => {
     fetch(`${API}/api/observations`).then(r => r.json()).then(setObservations).catch(() => {});
@@ -188,26 +129,55 @@ export default function ZkPage() {
     if (obs) setBiomarkerName(obs.canonical_name.replace(/_/g, " ").replace(/\b\w/g, c => c.toUpperCase()));
   }
 
-  // Smart-suggest claims based on common reference ranges. Each suggestion picks
-  // the most recent matching observation and pre-fills the form.
-  type Suggestion = { canonical: string; label: string; mode: "below" | "above"; threshold: number };
+  // Smart-suggest claims. Each suggestion lists every canonical name a parser
+  // might produce for the same biomarker; first matching observation wins.
+  type Suggestion = { canonicals: string[]; label: string; mode: "below" | "above"; threshold: number };
   const SUGGESTIONS: Suggestion[] = [
-    { canonical: "cholesterol",  label: "Cholesterol below 200",  mode: "below", threshold: 200 },
-    { canonical: "ldl",          label: "LDL below 130",          mode: "below", threshold: 130 },
-    { canonical: "hdl",          label: "HDL above 40",           mode: "above", threshold: 40  },
-    { canonical: "hba1c",        label: "HbA1c below 5.7",        mode: "below", threshold: 5.7 },
-    { canonical: "glucose",      label: "Glucose below 100",      mode: "below", threshold: 100 },
-    { canonical: "vitamin_d",    label: "Vitamin D above 30",     mode: "above", threshold: 30  },
-    { canonical: "ferritin",     label: "Ferritin above 30",      mode: "above", threshold: 30  },
-    { canonical: "tsh",          label: "TSH below 4.0",          mode: "below", threshold: 4.0 },
-    { canonical: "crp",          label: "CRP below 1.0",          mode: "below", threshold: 1.0 },
+    // Lipid panel
+    { canonicals: ["cholesterol", "total_cholesterol"],          label: "Cholesterol below 200", mode: "below", threshold: 200 },
+    { canonicals: ["ldl"],                                       label: "LDL below 130",         mode: "below", threshold: 130 },
+    { canonicals: ["hdl", "hdl_cholesterol"],                    label: "HDL above 40",          mode: "above", threshold: 40  },
+    { canonicals: ["non_hdl", "non-hdl_cholesterol"],            label: "Non-HDL below 130",     mode: "below", threshold: 130 },
+    { canonicals: ["triglycerides"],                             label: "Triglycerides below 150", mode: "below", threshold: 150 },
+    // Glucose / diabetes
+    { canonicals: ["glucose", "glucose_(fasting)"],              label: "Glucose below 100",     mode: "below", threshold: 100 },
+    { canonicals: ["hba1c", "hba", "hemoglobin_a"],              label: "HbA1c below 5.7",       mode: "below", threshold: 5.7 },
+    { canonicals: ["estimated_avg_glucose", "estimated_avg_glucose_(eag)"], label: "Avg glucose below 117", mode: "below", threshold: 117 },
+    // Inflammation
+    { canonicals: ["crp", "hs-crp_(high-sensitivity)"],          label: "CRP below 1.0",         mode: "below", threshold: 1.0 },
+    // Thyroid
+    { canonicals: ["tsh", "tsh_(thyroid_stimulating_hormone)"],  label: "TSH below 4.0",         mode: "below", threshold: 4.0 },
+    // Iron / anemia
+    { canonicals: ["ferritin"],                                  label: "Ferritin above 30",     mode: "above", threshold: 30  },
+    { canonicals: ["iron_saturation"],                           label: "Iron saturation above 20", mode: "above", threshold: 20 },
+    // Vitamins
+    { canonicals: ["vitamin_d", "oh_total"],                     label: "Vitamin D above 30",    mode: "above", threshold: 30  },
+    { canonicals: ["vitamin_b12", "vitamin_b"],                  label: "B12 above 200",         mode: "above", threshold: 200 },
+    { canonicals: ["folate"],                                    label: "Folate above 4",        mode: "above", threshold: 4   },
+    // Metabolic / kidney
+    { canonicals: ["creatinine"],                                label: "Creatinine below 1.3",  mode: "below", threshold: 1.3 },
+    { canonicals: ["egfr"],                                      label: "eGFR above 60",         mode: "above", threshold: 60  },
+    { canonicals: ["bun", "blood_urea_nitrogen_(bun)"],          label: "BUN below 20",          mode: "below", threshold: 20  },
+    // Liver
+    { canonicals: ["alt"],                                       label: "ALT below 56",          mode: "below", threshold: 56  },
+    { canonicals: ["ast"],                                       label: "AST below 40",          mode: "below", threshold: 40  },
+    // Minerals
+    { canonicals: ["calcium"],                                   label: "Calcium above 8.5",     mode: "above", threshold: 8.5 },
+    { canonicals: ["magnesium"],                                 label: "Magnesium above 1.7",   mode: "above", threshold: 1.7 },
+    { canonicals: ["potassium"],                                 label: "Potassium above 3.5",   mode: "above", threshold: 3.5 },
+    { canonicals: ["sodium"],                                    label: "Sodium above 135",      mode: "above", threshold: 135 },
+    { canonicals: ["zinc"],                                      label: "Zinc above 60",         mode: "above", threshold: 60  },
+    // CBC
+    { canonicals: ["hemoglobin"],                                label: "Hemoglobin above 12",   mode: "above", threshold: 12  },
+    { canonicals: ["platelets", "platelet_count"],               label: "Platelets above 150",   mode: "above", threshold: 150 },
+    { canonicals: ["wbc", "white_blood_cell_count_(wbc)"],       label: "WBC above 4",           mode: "above", threshold: 4   },
   ];
   const availableSuggestions = SUGGESTIONS.filter(s =>
-    observations.some(o => o.canonical_name === s.canonical)
+    observations.some(o => s.canonicals.includes(o.canonical_name))
   );
 
   function applySuggestion(s: Suggestion) {
-    const obs = observations.find(o => o.canonical_name === s.canonical);
+    const obs = observations.find(o => s.canonicals.includes(o.canonical_name));
     if (!obs) return;
     setSelectedObs(obs.obs_id);
     setBiomarkerName(obs.canonical_name.replace(/_/g, " ").replace(/\b\w/g, c => c.toUpperCase()));
@@ -264,11 +234,6 @@ export default function ZkPage() {
       </div>
 
       <section className="space-y-2">
-        <p className="section-label">Solana wallet</p>
-        <WalletBar />
-      </section>
-
-      <section className="space-y-2">
         <p className="section-label">Generate proof</p>
         {observations.length === 0 ? (
           <div className="card">
@@ -278,19 +243,35 @@ export default function ZkPage() {
           </div>
         ) : (
           <div className="card space-y-4">
-            {availableSuggestions.length > 0 && (
-              <div>
-                <p className="form-label">Quick claims</p>
-                <div className="flex gap-2 flex-wrap">
-                  {availableSuggestions.map(s => (
-                    <button key={s.canonical + s.threshold} type="button"
-                      className="btn-mode" onClick={() => applySuggestion(s)}>
-                      {s.mode === "above" ? "↑" : "↓"} {s.label}
-                    </button>
-                  ))}
+            {availableSuggestions.length > 0 && (() => {
+              const COLLAPSED_COUNT = 5;
+              const visible = showAllSuggestions
+                ? availableSuggestions
+                : availableSuggestions.slice(0, COLLAPSED_COUNT);
+              const hiddenCount = availableSuggestions.length - COLLAPSED_COUNT;
+              return (
+                <div>
+                  <p className="form-label">Quick claims</p>
+                  <div className="flex gap-2 flex-wrap">
+                    {visible.map(s => (
+                      <button key={s.label} type="button"
+                        className="btn-mode" onClick={() => applySuggestion(s)}>
+                        {s.mode === "above" ? "↑" : "↓"} {s.label}
+                      </button>
+                    ))}
+                    {hiddenCount > 0 && (
+                      <button
+                        type="button"
+                        className="btn-mode-ghost"
+                        onClick={() => setShowAllSuggestions(s => !s)}
+                      >
+                        {showAllSuggestions ? "Show less" : `+${hiddenCount} more`} {showAllSuggestions ? "↑" : "↓"}
+                      </button>
+                    )}
+                  </div>
                 </div>
-              </div>
-            )}
+              );
+            })()}
             <form onSubmit={handleProve} className="space-y-4">
               <div>
                 <label className="form-label">Lab observation</label>

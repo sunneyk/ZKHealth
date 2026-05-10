@@ -322,26 +322,23 @@ function PanelTable({ entries, isWearable }: { entries: LabEntry[]; isWearable: 
     });
   }, [entries, sort]);
 
-  function SortTh({ label, sk, align = "left" }: { label: string; sk: SortKey; align?: "left" | "right" | "center" }) {
-    const active = sort.key === sk;
-    return (
-      <th className={`lab-th${active ? " lab-th-active" : ""} lab-th-${align}`} onClick={() => handleSort(sk)}>
-        {label}{active && <span className="lab-sort-icon">{sort.dir === "asc" ? " ↑" : " ↓"}</span>}
-      </th>
-    );
-  }
+  const sortIndicator = (sk: SortKey) =>
+    sort.key === sk ? <span className="lab-sort-icon">{sort.dir === "asc" ? " ↑" : " ↓"}</span> : null;
+
+  const sortThClass = (sk: SortKey, align: "left" | "right" | "center" = "left") =>
+    `lab-th${sort.key === sk ? " lab-th-active" : ""} lab-th-${align}`;
 
   return (
     <div className="lab-table-scroll">
       <table className="lab-table">
         <thead>
           <tr>
-            <SortTh label="Test" sk="name" />
-            <SortTh label="Value" sk="value" align="right" />
+            <th className={sortThClass("name")} onClick={() => handleSort("name")}>Test{sortIndicator("name")}</th>
+            <th className={sortThClass("value", "right")} onClick={() => handleSort("value")}>Value{sortIndicator("value")}</th>
             {!isWearable && <th className="lab-th lab-th-center">Range</th>}
             {!isWearable && <th className="lab-th lab-th-right">Ref. Range</th>}
-            {!isWearable && <SortTh label="Flag" sk="flag" />}
-            <SortTh label="Date" sk="date" align="right" />
+            {!isWearable && <th className={sortThClass("flag")} onClick={() => handleSort("flag")}>Flag{sortIndicator("flag")}</th>}
+            <th className={sortThClass("date", "right")} onClick={() => handleSort("date")}>Date{sortIndicator("date")}</th>
           </tr>
         </thead>
         <tbody>
@@ -353,8 +350,8 @@ function PanelTable({ entries, isWearable }: { entries: LabEntry[]; isWearable: 
 }
 
 // ── Panel card ────────────────────────────────────────────────────
-function PanelCard({ panelKey, label, sym, entries, isWearable }: {
-  panelKey: string; label: string; sym: string; entries: LabEntry[]; isWearable: boolean;
+function PanelCard({ label, sym, entries, isWearable }: {
+  label: string; sym: string; entries: LabEntry[]; isWearable: boolean;
 }) {
   const flagged = entries.filter(e => e.flag).length;
   return (
@@ -401,7 +398,10 @@ export default function DashboardPage() {
       .finally(() => setLoading(false));
   }, []);
 
-  useEffect(() => { load(); }, [load]);
+  useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    load();
+  }, [load]);
 
   async function handleDelete(doc_id: string) {
     try {
@@ -504,7 +504,7 @@ export default function DashboardPage() {
     <div className="space-y-8 cascade">
       <div>
         <h1 className="page-title">Dashboard</h1>
-        <p className="page-subtitle">A snapshot of everything you've uploaded.</p>
+        <p className="page-subtitle">A snapshot of everything you&apos;ve uploaded.</p>
       </div>
 
       {obs.length === 0 ? (
@@ -542,7 +542,7 @@ export default function DashboardPage() {
                       <p className="source-section-label">{sourceLabel}</p>
                     )}
                     {panels.map(p => (
-                      <PanelCard key={p.key} panelKey={p.key} label={p.label} sym={p.sym} entries={p.entries} isWearable={false} />
+                      <PanelCard key={p.key} label={p.label} sym={p.sym} entries={p.entries} isWearable={false} />
                     ))}
                   </div>
                 ))}
@@ -552,7 +552,7 @@ export default function DashboardPage() {
                       <p className="source-section-label">{sourceLabel}</p>
                     )}
                     {panels.map(p => (
-                      <PanelCard key={p.key} panelKey={p.key} label={p.label} sym={p.sym} entries={p.entries} isWearable={true} />
+                      <PanelCard key={p.key} label={p.label} sym={p.sym} entries={p.entries} isWearable={true} />
                     ))}
                   </div>
                 ))}

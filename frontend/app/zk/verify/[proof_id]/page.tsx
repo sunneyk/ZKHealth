@@ -44,11 +44,6 @@ export default function ProofVerifyPage({ params }: { params: Promise<{ proof_id
     ? `https://explorer.solana.com/tx/${result.solana_tx_id}?cluster=devnet`
     : null;
 
-  const [shareUrl, setShareUrl] = useState("");
-  useEffect(() => {
-    if (typeof window !== "undefined") setShareUrl(window.location.href);
-  }, []);
-
   return (
     <div className="space-y-6 cascade">
       <div>
@@ -123,32 +118,6 @@ export default function ProofVerifyPage({ params }: { params: Promise<{ proof_id
               </button>
             </div>
           </div>
-
-          <details className="how-details">
-            <summary className="how-summary">
-              <span className="how-arrow">▶</span> Share with QR code
-            </summary>
-            <div className="how-body flex items-center gap-4 flex-wrap">
-              {shareUrl && (
-                <img
-                  src={`https://api.qrserver.com/v1/create-qr-code/?data=${encodeURIComponent(shareUrl)}&size=180x180&margin=8&bgcolor=fefbf4`}
-                  alt="QR code linking to this verification page"
-                  width={180} height={180}
-                  className="rounded-md border border-[var(--rule-s)]"
-                />
-              )}
-              <div className="space-y-1.5 flex-1 min-w-[200px]">
-                <p className="stat-label">Open on a phone to verify in person</p>
-                <p className="text-xs break-all text-[var(--ink-3)] font-mono">{shareUrl}</p>
-                <button
-                  className="btn-ghost"
-                  onClick={() => { navigator.clipboard.writeText(shareUrl); toast.success("URL copied"); }}
-                >
-                  Copy URL
-                </button>
-              </div>
-            </div>
-          </details>
 
           <p className="page-subtitle">
             Verification runs against this device&apos;s proof store.

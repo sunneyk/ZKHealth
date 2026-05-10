@@ -1,148 +1,202 @@
 # ZKHealth
 
-**Prove health claims without revealing your data.**
+> Prove a health claim. Reveal nothing else.
 
-ZKHealth lets you upload lab results, wearable exports, or Apple Health data, chat with an AI about your health, and generate zero-knowledge proofs that verify a health claim (e.g. "my ferritin is below 100") without exposing the underlying value. Proofs are anchored on Solana devnet for tamper-evident timestamping.
+ZKHealth is a local-first web application for understanding and selectively sharing your medical and wearable data. Lab PDFs, wearable exports, and direct OAuth syncs from Fitbit / WHOOP / Oura flow into a single dashboard that lives on your device. When sharing matters, ZKHealth turns each fact about your data into a zero-knowledge proof — verifiable in any browser, anchored on Solana, and revealing nothing about the underlying value.
 
-## Stack
-
-- **Frontend**: Next.js 16, Tailwind CSS 4, `@solana/wallet-adapter-react` (Phantom)
-- **Backend**: FastAPI + Python, [snarkjs](https://github.com/iden3/snarkjs) (Groth16), [circom](https://github.com/iden3/circom) circuit
-- **Chain**: Solana devnet, Memo program (no PHI on-chain — only a SHA-256 hash prefix)
-- **AI**: Anthropic API (prompt-cached health chat, falls back to local CLI)
+A research marketplace lets you opt biomarkers into queryable aggregates. Buyers pay through a per-query escrow program; payouts are split atomically across contributors. Every release is calibrated to a formal differential-privacy guarantee.
 
 ---
 
-## Quick Start
+## Architecture
+
+| Layer | Stack |
+|---|---|
+| Frontend | Next.js 16 (App Router, Turbopack) · React 19 · Tailwind CSS 4 · `@solana/wallet-adapter` |
+| Backend | FastAPI · SQLite · Python 3.11+ |
+| ZK | circom 2 · snarkjs · Groth16 over BN254 · Poseidon hash |
+| On-chain | Solana devnet · Memo program (proof anchoring) · Anchor program for marketplace escrow |
+| AI | Anthropic SDK with ephemeral prompt caching (CLI fallback when no key is set) |
+| Privacy | Two-tier storage with regex-based PII scrubbing for outbound text · ε-differential privacy (Laplace mechanism) for marketplace queries |
+
+---
+
+## Quick start
 
 ### Prerequisites
 
-| Tool | Install |
-|------|---------|
-| Node.js ≥ 18 | https://nodejs.org |
-| Python ≥ 3.11 | https://python.org |
-| snarkjs | `npm install -g snarkjs` |
-| Solana CLI (optional) | https://docs.solana.com/cli/install-solana-cli-tools |
+| Tool | Version | Notes |
+|---|---|---|
+| Node.js | ≥ 18 | for the Next.js frontend and snarkjs |
+| Python | ≥ 3.11 | for the FastAPI backend |
+| `snarkjs` | latest | `npm install -g snarkjs` |
+| Solana CLI | optional | only needed for on-chain anchoring and the marketplace treasury |
 
-Set `ANTHROPIC_API_KEY` in your environment for AI chat (see `.env.example`).
-
-### 1 — Backend
+### Backend
 
 ```bash
-cd ZKHealth
 python -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 uvicorn backend.main:app --reload --port 8000
 ```
 
-### 2 — Frontend
+### Frontend
 
 ```bash
-cd ZKHealth/frontend
+cd frontend
 npm install
-npm run dev
-# → http://localhost:3000
+npm run dev          # http://localhost:3000
 ```
 
-### 3 — (Optional) Solana devnet keypair
+### On-chain features (optional)
+
+To enable proof anchoring and the marketplace treasury:
 
 ```bash
 solana-keygen new --outfile ~/.config/solana/id.json
 solana config set --url devnet
 solana airdrop 2
+
+# Generate a separate treasury keypair for the marketplace (one-time):
+node -e "const {Keypair} = require('@solana/web3.js'); const fs = require('fs'); \
+  const kp = Keypair.generate(); \
+  fs.writeFileSync('backend/chain/treasury.json', JSON.stringify(Array.from(kp.secretKey))); \
+  console.log('Treasury:', kp.publicKey.toBase58());"
+
+# Fund the treasury:
+solana transfer <TREASURY_PUBKEY> 0.1 --url devnet --allow-unfunded-recipient
 ```
 
----
+Set `TREASURY_KEYPAIR_PATH=/path/to/backend/chain/treasury.json` in `.env`.
 
-## Features
+### AI chat
 
-- **Health chat** — upload lab PDFs, wearable CSVs, or Apple Health ZIPs and ask questions about your data
-- **ZK threshold proofs** — prove a value is below, above, or within a range without revealing it (Groth16/BN254)
-- **Solana anchoring** — SHA-256 hash of each proof posted as a Memo tx; no PHI on-chain
-- **Proof export** — self-contained HTML verifier, works in any browser with no installs
-- **Dashboard** — panel-grouped lab results with reference ranges, flags, and trend charts
-- **Data marketplace** — opt-in biomarkers for sale; researchers pay SOL, receive ε-DP anonymized snapshots (Laplace mechanism, ε = 1.0)
-- **Fitbit integration** — OAuth2 direct sync of steps, sleep, and heart rate
+Set `ANTHROPIC_API_KEY` in `.env` to enable prompt-cached chat. Without a key, the backend falls back to the local Claude CLI binary if installed.
+
+### Wearables
+
+Connect a wearable from the **Wearable** page in the UI. Each provider requires a developer app at the provider's portal — credentials are pasted directly in the modal (no env edits required). Fallback env vars are documented in `.env.example` for headless deployments.
 
 ---
 
 ## How it works
 
 ```
-Lab PDF / Wearable CSV / Apple Health ZIP
-        │
-        ▼
-  FastAPI /api/upload
-  pdfplumber + regex → observations saved to SQLite
-        │
-        ▼
-  /api/zk/prove
-  1. Poseidon commitment over (value, nonce, pseudonym_id, biomarker_id, date)
-  2. HMAC-SHA256 mock attestation (simulates trusted lab signature)
-  3. Groth16 circuit (circom) proves value < threshold (or > threshold, or in range)
-     — only commitment + threshold + pass/fail bit are public
-  4. SHA-256 hash of proof anchored as Solana Memo tx
-        │
-        ▼
-  Export → self-contained HTML
-  Verifier opens HTML in any browser — no installs needed
-  Web Crypto API checks hash integrity
-  snarkjs loaded from CDN for full Groth16 verification
+                                  ┌──────────────────────────────┐
+                                  │  Local SQLite (two tiers)     │
+   PDF / CSV / Apple Health ZIP   │   tier 1 — raw ingested text  │
+   Fitbit / WHOOP / Oura sync     │   tier 2 — PII-scrubbed copy  │
+            │                     └──────────────────────────────┘
+            ▼                                ▲
+   ┌─────────────────┐                       │
+   │  /api/upload    │ ──────────────────────┘
+   │  pdfplumber +   │   tier 1 = raw         tier 2 = regex-scrubbed
+   │  regex parsing  │                        (used for outbound chat
+   └─────────────────┘                         and external API calls)
+            │
+            │   Each numeric observation gets a Poseidon commitment
+            │   and a signed attestation on ingest.
+            ▼
+   ┌─────────────────────────────────────────────────────────────┐
+   │  /api/zk/prove  — generates a Groth16 proof:                │
+   │    private inputs:  value, nonce, pseudonym_id, biomarker_id│
+   │    public inputs:   threshold, date_int, commitment         │
+   │    output:          1 if value < threshold, else 0          │
+   │                                                             │
+   │   Range and "above" claims are composed from this primitive.│
+   └─────────────────────────────────────────────────────────────┘
+            │
+            │   Proof hash anchored as a Solana Memo transaction
+            ▼   for tamper-evident timestamping (no PHI on chain).
+   ┌─────────────────────────────────────────────────────────────┐
+   │  /api/zk/export — emits a self-contained HTML verifier      │
+   │  • Web Crypto API checks file integrity                     │
+   │  • snarkjs (loaded from CDN) re-runs Groth16 verification   │
+   │  • Solana Explorer link cross-checks the on-chain anchor    │
+   └─────────────────────────────────────────────────────────────┘
 ```
 
-### Circuit
+### The circuit
 
-`circuit/threshold_attestation.circom` — Groth16 on BN254 curve.
+`circuit/threshold_attestation.circom` proves a single relation: `value < threshold`. The Poseidon commitment binds the proof to the original signed attestation, preventing substitution. Range proofs (`low ≤ value < high`) and above-threshold proofs are composed at the application layer from this primitive.
 
-Public inputs: `commitment`, `threshold`, `date_int`  
-Private inputs: `value`, `nonce`, `pseudonym_id`, `biomarker_id`  
-Constraint: `value < threshold` (range and above-threshold claims composed from this)
+### Two-tier data isolation
+
+`backend/anonymize.py` defines six deterministic regex patterns (SSN, phone, email, DOB, labeled identifier, address). Every uploaded document is stored twice:
+
+- `documents` (Tier 1) — raw text, used for ZK proof generation and on-screen rendering. Never crosses the network.
+- `documents_tier2` — anonymized copy, used as LLM context and any other outbound payload.
+
+`get_all_content_tier2()` is the only path used by the chat endpoint and the AI insights generator.
+
+### Marketplace privacy & payments
+
+Per-biomarker aggregates use the Laplace mechanism with ε = 1.0 — sensitivity is computed from each query's observed range divided by contributor count. Payments route through a per-query escrow PDA defined by the `zkhealth_split` Anchor program (`program/zkhealth_split/src/lib.rs`); the backend authority signs a single `release` instruction that atomically distributes shares across contributor wallets.
 
 ---
 
-## Demo walkthrough
-
-1. Open http://localhost:3000
-2. Upload `sample_data/sample_wearables.csv` (or any lab PDF)
-3. Chat: *"What was my average HRV last week?"*
-4. Go to **ZK Proofs** tab
-5. Select a biomarker, choose a claim type (below / above / range), click **Generate ZK Proof**
-6. Click **Export** → download the self-contained HTML verifier
-7. Open the HTML in any browser — hit **Verify** to confirm the proof
-
----
-
-## Project structure
+## Project layout
 
 ```
-ZKHealth/
+.
 ├── backend/
-│   ├── main.py          # FastAPI app
-│   ├── db.py            # SQLite
-│   ├── ingest.py        # PDF + CSV parsing
-│   ├── llm.py           # AI chat (Anthropic API + local CLI fallback)
-│   ├── market.py        # ε-DP anonymization (Laplace mechanism)
-│   ├── wearable.py      # Fitbit OAuth2 + sync
-│   ├── chain/
-│   │   ├── solana_anchor.py   # Solana devnet Memo anchoring
-│   │   └── _memo_bridge.cjs   # Node.js Solana web3 bridge
+│   ├── main.py                 FastAPI application
+│   ├── db.py                   SQLite schema + helpers (two-tier)
+│   ├── anonymize.py            Regex-based PII scrubber for outbound text
+│   ├── ingest.py               PDF + CSV parsers
+│   ├── ingest_apple_health.py  Apple Health export.zip parser
+│   ├── llm.py                  Anthropic SDK wrapper (CLI fallback)
+│   ├── market.py               ε-DP anonymization + mock contributor profiles
+│   ├── chain/                  Solana operations
+│   │   ├── solana_anchor.py    Memo anchoring + treasury operations
+│   │   ├── _memo_bridge.cjs    Memo program transaction signer
+│   │   ├── _treasury_bridge.cjs Treasury keypair operations
+│   │   └── payment_verify.cjs  Payment-verification RPC client
+│   ├── wearable/               OAuth2 + sync per provider
+│   │   ├── _common.py          Shared OAuth + token refresh + DB-backed credentials
+│   │   ├── fitbit.py
+│   │   ├── whoop.py
+│   │   └── oura.py
 │   └── zk/
-│       ├── attestation.py     # Poseidon commitment + mock signing
-│       ├── prover.py          # Groth16 proof generation
-│       ├── verifier.py        # snarkjs verification
-│       └── html_export.py     # Self-contained HTML builder
+│       ├── attestation.py      Poseidon commitment + signed attestation
+│       ├── prover.py           Groth16 proof generation
+│       ├── verifier.py         Proof + signature verification
+│       └── html_export.py      Self-contained HTML verifier templates
+│
 ├── circuit/
 │   ├── threshold_attestation.circom
 │   ├── threshold_attestation_final.zkey
 │   ├── verification_key.json
-│   └── threshold_attestation_js/   # .wasm + witness calculator
-├── frontend/            # Next.js app
+│   └── threshold_attestation_js/
+│
+├── program/
+│   └── zkhealth_split/         Anchor program for atomic payment splits
+│
+├── frontend/                   Next.js 16 app
 │   └── app/
-│       ├── page.tsx          # Chat page
-│       ├── dashboard/        # Lab dashboard with trend charts
-│       ├── zk/               # ZK proof generation and verification
-│       ├── market/           # Data marketplace
-│       └── wearable/         # Fitbit connect
+│       ├── page.tsx            Chat
+│       ├── dashboard/          Lab + wearable dashboard
+│       ├── zk/                 Proof generation, verification, public share
+│       ├── market/             Biomarker marketplace
+│       ├── wearable/           Provider connections
+│       └── components/         NavHeader, Modal, UploadContext, ThemeToggle
+│
 └── sample_data/
     └── sample_wearables.csv
 ```
+
+---
+
+## Development
+
+The backend hot-reloads via `uvicorn --reload`. The frontend uses Next.js Turbopack for fast refresh. Run the linter with:
+
+```bash
+cd frontend && npx eslint .
+```
+
+---
+
+## License
+
+MIT — see [LICENSE](LICENSE).

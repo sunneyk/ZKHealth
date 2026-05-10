@@ -1,4 +1,10 @@
-"""Plain SQLite database for ZKHealth demo."""
+"""SQLite persistence layer.
+
+Stores ingested documents (Tier 1, raw), their PII-scrubbed Tier 2 copies,
+extracted observations, ZK attestations and proofs, marketplace listings and
+grants, and per-key settings (provider credentials, OAuth tokens, wallet
+pubkeys).
+"""
 from __future__ import annotations
 
 import json
@@ -72,6 +78,16 @@ def init_db() -> None:
             anonymized_data TEXT NOT NULL DEFAULT '[]',
             created_at TEXT NOT NULL DEFAULT (datetime('now'))
         );
+        -- Tier 2: regex-anonymized copy of each document's content.
+        -- This is what gets sent to the LLM as chat context. Tier 1 (the
+        -- `documents` table above) holds the raw ingested text and never
+        -- leaves the device for an external service.
+        CREATE TABLE IF NOT EXISTS documents_tier2 (
+            doc_id TEXT PRIMARY KEY,
+            content_anon TEXT NOT NULL,
+            redaction_counts TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL DEFAULT (datetime('now'))
+        );
     """)
     conn.commit()
     conn.close()
@@ -132,6 +148,7 @@ def delete_document(doc_id: str) -> None:
         (doc_id,),
     )
     conn.execute("DELETE FROM observations WHERE doc_id = ?", (doc_id,))
+    conn.execute("DELETE FROM documents_tier2 WHERE doc_id = ?", (doc_id,))
     conn.execute("DELETE FROM documents WHERE doc_id = ?", (doc_id,))
     conn.commit()
     conn.close()
@@ -151,7 +168,11 @@ def get_observations() -> list[dict]:
 
 
 def get_all_content() -> str:
-    """Return all uploaded document content concatenated for LLM context."""
+    """Return all uploaded raw document content (Tier 1).
+
+    DEPRECATED for outbound use — call `get_all_content_tier2()` for anything
+    that leaves the device. Kept for direct local-only consumers.
+    """
     conn = get_conn()
     rows = conn.execute("SELECT filename, doc_type, content FROM documents ORDER BY created_at DESC").fetchall()
     conn.close()
@@ -159,6 +180,51 @@ def get_all_content() -> str:
     for r in rows:
         parts.append(f"=== {r['filename']} ({r['doc_type']}) ===\n{r['content']}")
     return "\n\n".join(parts)
+
+
+def get_all_content_tier2() -> str:
+    """Return all anonymized document content (Tier 2) for LLM context.
+
+    Falls back to raw Tier 1 content if a document predates the Tier 2 table.
+    """
+    conn = get_conn()
+    rows = conn.execute(
+        """
+        SELECT d.filename, d.doc_type,
+               COALESCE(t2.content_anon, d.content) AS content
+        FROM documents d
+        LEFT JOIN documents_tier2 t2 ON t2.doc_id = d.doc_id
+        ORDER BY d.created_at DESC
+        """
+    ).fetchall()
+    conn.close()
+    return "\n\n".join(f"=== {r['filename']} ({r['doc_type']}) ===\n{r['content']}" for r in rows)
+
+
+def save_tier2(doc_id: str, content_anon: str, redaction_counts: dict) -> None:
+    """Insert or replace the Tier 2 (anonymized) copy for a document."""
+    conn = get_conn()
+    conn.execute(
+        "INSERT OR REPLACE INTO documents_tier2 (doc_id, content_anon, redaction_counts) VALUES (?,?,?)",
+        (doc_id, content_anon, json.dumps(redaction_counts)),
+    )
+    conn.commit()
+    conn.close()
+
+
+def get_tier2_stats() -> dict:
+    """Aggregate redaction counts across all Tier 2 entries — for UI display."""
+    conn = get_conn()
+    rows = conn.execute("SELECT redaction_counts FROM documents_tier2").fetchall()
+    conn.close()
+    totals: dict[str, int] = {}
+    for r in rows:
+        try:
+            for tag, n in json.loads(r["redaction_counts"]).items():
+                totals[tag] = totals.get(tag, 0) + int(n)
+        except (json.JSONDecodeError, TypeError, ValueError):
+            continue
+    return {"totals": totals, "documents": len(rows), "total_redactions": sum(totals.values())}
 
 
 def save_attestation(obs_id: str, payload: dict) -> str:

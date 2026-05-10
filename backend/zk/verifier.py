@@ -1,4 +1,9 @@
-"""Simplified ZK verifier for ZKHealth demo."""
+"""Proof + attestation-signature verification.
+
+`verify_proof` re-runs Groth16 verification against the published verification
+key. `verify_signature` confirms the attestation HMAC binding the Poseidon
+commitment to the signing key.
+"""
 from __future__ import annotations
 
 import hashlib
@@ -10,6 +15,11 @@ from pathlib import Path
 
 _CIRCUIT_DIR = Path(__file__).parent.parent.parent / "circuit"
 _VKEY = _CIRCUIT_DIR / "verification_key.json"
+
+# Shared secret used by attest_observation() to sign each commitment. In
+# production this would be a real Ed25519 keypair issued to a trusted source
+# (lab partner, wearable provider) — the demo uses a fixed HMAC key so the
+# end-to-end verification path stays self-contained.
 _MOCK_SIGNING_KEY = b"zkhealth-demo-mock-signing-key-01"
 
 

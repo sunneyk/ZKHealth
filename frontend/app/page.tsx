@@ -1,8 +1,9 @@
 "use client";
-import { useState, useRef, useEffect } from "react";
+import { useState, useRef, useEffect, useCallback } from "react";
 import { toast } from "sonner";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
+import { useUpload } from "./components/UploadContext";
 
 const API = "http://127.0.0.1:8000";
 
@@ -40,28 +41,52 @@ export default function ChatPage() {
   const [loadedFiles, setLoadedFiles] = useState<LoadedFile[]>([]);
   const [hasExistingData, setHasExistingData] = useState(false);
   const [input, setInput] = useState("");
-  const [uploading, setUploading] = useState(false);
   const [thinking, setThinking] = useState(false);
-  const [seeding, setSeeding] = useState(false);
-  const [insightsLoading, setInsightsLoading] = useState(false);
+  const [dragActive, setDragActive] = useState(false);
   const fileRef = useRef<HTMLInputElement>(null);
+  const { uploading, startUpload, finishUpload, onFinish } = useUpload();
 
-  useEffect(() => {
-    fetch(`${API}/api/documents`)
-      .then(r => r.json())
-      .then((docs: Doc[]) => {
-        setHasExistingData(docs.length > 0);
-        setMessages([{ role: "assistant", text: buildWelcome(docs) }]);
-      })
-      .catch(() => {
-        setMessages([{ role: "assistant", text: buildWelcome([]) }]);
-      });
+  // Refresh welcome message based on current docs. Replaces only the first
+  // (welcome) message to preserve any chat history.
+  const refreshWelcome = useCallback(async () => {
+    try {
+      const docs: Doc[] = await fetch(`${API}/api/documents`).then(r => r.json());
+      setHasExistingData(docs.length > 0);
+      const welcome = { role: "assistant" as const, text: buildWelcome(docs) };
+      setMessages((m) => (m.length === 0 ? [welcome] : [welcome, ...m.slice(1)]));
+    } catch {
+      setMessages((m) => (m.length === 0 ? [{ role: "assistant", text: buildWelcome([]) }] : m));
+    }
   }, []);
 
-  async function handleUpload(e: React.ChangeEvent<HTMLInputElement>) {
-    const file = e.target.files?.[0];
-    if (!file) return;
-    setUploading(true);
+  // Initial load + refresh whenever the tab regains focus
+  useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    refreshWelcome();
+    const onVis = () => { if (document.visibilityState === "visible") refreshWelcome(); };
+    window.addEventListener("focus", refreshWelcome);
+    document.addEventListener("visibilitychange", onVis);
+    return () => {
+      window.removeEventListener("focus", refreshWelcome);
+      document.removeEventListener("visibilitychange", onVis);
+    };
+  }, [refreshWelcome]);
+
+  // Refresh after any upload finishes (even if it kicked off from another tab/page)
+  useEffect(() => onFinish(refreshWelcome), [onFinish, refreshWelcome]);
+
+  async function processFile(file: File) {
+    const allowed = [".pdf", ".csv", ".zip"];
+    const lower = file.name.toLowerCase();
+    if (!allowed.some(ext => lower.endsWith(ext))) {
+      toast.error("Unsupported file — drop a PDF, CSV, or Apple Health ZIP");
+      return;
+    }
+    if (uploading) {
+      toast.warning("Already uploading — wait for the current upload to finish");
+      return;
+    }
+    startUpload(file.name);
     try {
       const fd = new FormData();
       fd.append("file", file);
@@ -81,46 +106,41 @@ export default function ChatPage() {
     } catch (err: unknown) {
       toast.error(`Upload failed: ${err instanceof Error ? err.message : String(err)}`);
     } finally {
-      setUploading(false);
+      finishUpload();
       if (fileRef.current) fileRef.current.value = "";
     }
   }
 
-  async function handleLoadDemo() {
-    setSeeding(true);
-    try {
-      const res = await fetch(`${API}/api/demo/load`, { method: "POST" });
-      if (!res.ok) throw new Error((await res.json()).detail);
-      const data = await res.json();
-      if (data.already_loaded) {
-        toast.info("Demo data already loaded");
-      } else {
-        toast.success(`Loaded ${data.lab_observations} lab values + ${data.wearable_observations} wearable readings`);
-        setHasExistingData(true);
-        setMessages((m) => [...m, {
-          role: "assistant",
-          text: `Loaded a sample bloodwork panel (${data.lab_observations} biomarkers) and 7 days of wearable data (${data.wearable_observations} readings). Try asking *"What stands out in my bloodwork?"* or click **Generate insights** above.`,
-        }]);
-      }
-    } catch (err: unknown) {
-      toast.error(`Failed: ${err instanceof Error ? err.message : String(err)}`);
-    } finally {
-      setSeeding(false);
-    }
+  async function handleUpload(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    if (file) await processFile(file);
   }
 
-  async function handleInsights() {
-    setInsightsLoading(true);
-    try {
-      const res = await fetch(`${API}/api/insights`, { method: "POST" });
-      if (!res.ok) throw new Error((await res.json()).detail);
-      const { summary } = await res.json();
-      setMessages((m) => [...m, { role: "assistant", text: summary }]);
-    } catch (err: unknown) {
-      toast.error(`Insights failed: ${err instanceof Error ? err.message : String(err)}`);
-    } finally {
-      setInsightsLoading(false);
-    }
+  function handleDragEnter(e: React.DragEvent<HTMLLabelElement>) {
+    e.preventDefault();
+    e.stopPropagation();
+    if (e.dataTransfer.types.includes("Files")) setDragActive(true);
+  }
+
+  function handleDragOver(e: React.DragEvent<HTMLLabelElement>) {
+    e.preventDefault();
+    e.stopPropagation();
+    if (e.dataTransfer.types.includes("Files")) setDragActive(true);
+  }
+
+  function handleDragLeave(e: React.DragEvent<HTMLLabelElement>) {
+    e.preventDefault();
+    e.stopPropagation();
+    // Only clear when leaving the zone itself, not its children
+    if (e.currentTarget === e.target) setDragActive(false);
+  }
+
+  async function handleDrop(e: React.DragEvent<HTMLLabelElement>) {
+    e.preventDefault();
+    e.stopPropagation();
+    setDragActive(false);
+    const file = e.dataTransfer.files?.[0];
+    if (file) await processFile(file);
   }
 
   async function handleSend(e: React.FormEvent) {
@@ -153,35 +173,31 @@ export default function ChatPage() {
         <p className="page-subtitle">Upload your health data and ask anything. All processing is local.</p>
       </div>
 
-      <label className={`upload-zone ${uploading ? "is-uploading" : ""}`}>
+      <label
+        className={`upload-zone ${uploading ? "is-uploading" : ""} ${dragActive ? "is-drag-active" : ""}`}
+        onDragEnter={handleDragEnter}
+        onDragOver={handleDragOver}
+        onDragLeave={handleDragLeave}
+        onDrop={handleDrop}
+      >
         <input ref={fileRef} type="file" accept=".pdf,.csv,.zip" className="hidden" onChange={handleUpload} />
         <div className="upload-icon">
-          <span className="text-base">{uploading ? "⏳" : "📎"}</span>
+          <span className="text-base">{uploading ? "⏳" : dragActive ? "⤓" : "📎"}</span>
         </div>
         <div>
           <p className="upload-label">
-            {uploading ? "Uploading…" : hasExistingData ? "Add new records" : "Upload health data"}
+            {uploading ? "Uploading…" : dragActive ? "Drop to upload" : hasExistingData ? "Add new records" : "Upload health data"}
           </p>
           <p className="upload-hint">
-            {hasExistingData
-              ? "New bloodwork · Updated wearable export · Apple Health ZIP"
-              : "PDF lab reports · CSV wearable exports · Apple Health ZIP"}
+            {dragActive
+              ? "Release the file to ingest it"
+              : hasExistingData
+              ? "Drop or click · PDF · CSV · Apple Health ZIP"
+              : "Drop or click · PDF lab reports · CSV wearables · Apple Health ZIP"}
           </p>
         </div>
       </label>
 
-      <div className="flex flex-wrap gap-2">
-        {!hasExistingData && (
-          <button onClick={handleLoadDemo} disabled={seeding} className="btn-mode-active">
-            {seeding ? "Loading…" : "✨ Try with sample data"}
-          </button>
-        )}
-        {hasExistingData && (
-          <button onClick={handleInsights} disabled={insightsLoading} className="btn-mode-active">
-            {insightsLoading ? "Analyzing…" : "✨ Generate insights"}
-          </button>
-        )}
-      </div>
 
       {loadedFiles.length > 0 && (
         <div className="loaded-bar">

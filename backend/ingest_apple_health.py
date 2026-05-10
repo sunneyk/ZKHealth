@@ -1,8 +1,8 @@
-"""Apple Health export.zip parser for ZKHealth demo.
+"""Apple Health export.zip parser.
 
-Standalone — no HealthBot dependencies.
-Parses export.xml, aggregates to daily values, returns observations
-compatible with ZKHealth's save_observation() schema.
+Reads `export.xml` from the user's Apple Health export, aggregates per-record
+samples to daily values, and returns observations in the same shape as the
+PDF and CSV ingestors.
 """
 from __future__ import annotations
 

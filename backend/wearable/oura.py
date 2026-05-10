@@ -20,19 +20,19 @@ _SCOPES = "personal email daily heartrate spo2"
 
 
 def _client_id() -> str:
-    return c.env_required("OURA_CLIENT_ID", "Oura client ID")
+    return c.cred_required(PROVIDER, "client_id", "Oura client ID")
 
 
 def _client_secret() -> str:
-    return c.env_required("OURA_CLIENT_SECRET", "Oura client secret")
+    return c.cred_required(PROVIDER, "client_secret", "Oura client secret")
 
 
 def _redirect_uri() -> str:
-    return c.env_optional("OURA_REDIRECT_URI", "http://localhost:8000/api/wearable/oura/callback")
+    return c.cred_get(PROVIDER, "redirect_uri") or "http://localhost:8000/api/wearable/oura/callback"
 
 
 def is_configured() -> bool:
-    return bool(c.env_optional("OURA_CLIENT_ID"))
+    return bool(c.cred_get(PROVIDER, "client_id"))
 
 
 def get_status() -> dict:
@@ -83,41 +83,42 @@ def sync_data(days: int = 7) -> dict:
     params = {"start_date": s, "end_date": e}
 
     doc_id = c.begin_sync_doc(PROVIDER, LABEL, s, e)
-    count = 0
+    specs: list[dict] = []
+
+    def _add(date_str, canonical, value, unit):
+        spec = c.save_obs_pending(doc_id, canonical, value, unit, date_str)
+        if spec:
+            specs.append(spec)
 
     with httpx.Client(base_url=_API_BASE, timeout=15.0) as client:
-        # Daily sleep — score
         r = client.get("/v2/usercollection/daily_sleep", headers=headers, params=params)
         if r.is_success:
             for d in r.json().get("data", []):
-                count += c.save_synced_observation(doc_id, "sleep_score", d.get("score"), "score", d.get("day"))
+                _add(d.get("day"), "sleep_score", d.get("score"), "score")
 
-        # Daily readiness
         r = client.get("/v2/usercollection/daily_readiness", headers=headers, params=params)
         if r.is_success:
             for d in r.json().get("data", []):
-                count += c.save_synced_observation(doc_id, "readiness_score", d.get("score"), "score", d.get("day"))
+                _add(d.get("day"), "readiness_score", d.get("score"), "score")
 
-        # Daily activity — score + steps
         r = client.get("/v2/usercollection/daily_activity", headers=headers, params=params)
         if r.is_success:
             for d in r.json().get("data", []):
                 day = d.get("day")
-                count += c.save_synced_observation(doc_id, "activity_score", d.get("score"), "score", day)
-                count += c.save_synced_observation(doc_id, "steps", d.get("steps"), "steps", day)
-                count += c.save_synced_observation(doc_id, "active_minutes", d.get("high_activity_time"), "min", day)
+                _add(day, "activity_score", d.get("score"), "score")
+                _add(day, "steps", d.get("steps"), "steps")
+                _add(day, "active_minutes", d.get("high_activity_time"), "min")
 
-        # Detailed sleep — RHR, HRV, total sleep, SpO2 (if available)
         r = client.get("/v2/usercollection/sleep", headers=headers, params=params)
         if r.is_success:
             for sleep in r.json().get("data", []):
                 day = sleep.get("day")
                 rhr = sleep.get("lowest_heart_rate") or sleep.get("average_heart_rate")
-                count += c.save_synced_observation(doc_id, "resting_heart_rate", rhr, "bpm", day)
-                count += c.save_synced_observation(doc_id, "hrv", sleep.get("average_hrv"), "ms", day)
+                _add(day, "resting_heart_rate", rhr, "bpm")
+                _add(day, "hrv", sleep.get("average_hrv"), "ms")
                 total = sleep.get("total_sleep_duration") or 0
-                count += c.save_synced_observation(doc_id, "sleep_hours", round(total / 3600, 2) if total else None, "h", day)
+                _add(day, "sleep_hours", round(total / 3600, 2) if total else None, "h")
                 spo2 = (sleep.get("spo2_percentage") or {}).get("average")
-                count += c.save_synced_observation(doc_id, "spo2", spo2, "%", day)
+                _add(day, "spo2", spo2, "%")
 
-    return c.finalize_sync(PROVIDER, e, doc_id, count, s)
+    return c.finalize_sync(PROVIDER, e, doc_id, specs, s)

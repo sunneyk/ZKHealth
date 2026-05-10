@@ -1,36 +1,29 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# ZKHealth — Frontend
 
-## Getting Started
+Next.js 16 (App Router, Turbopack) UI for the ZKHealth backend.
 
-First, run the development server:
+## Run locally
 
 ```bash
-npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
+npm install
+npm run dev          # http://localhost:3000
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+The frontend assumes the FastAPI backend is running at `http://127.0.0.1:8000`. To change this, update the `API` constant at the top of each page module.
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+## Pages
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+| Route | Purpose |
+|---|---|
+| `/` | Health chat with PDF / CSV / Apple Health upload |
+| `/dashboard` | Lab + wearable dashboard with reference ranges and trend charts |
+| `/zk` | ZK proof generation and verification |
+| `/zk/verify/[id]` | Public verification page for a single proof |
+| `/market` | Biomarker marketplace (list, sell, purchase) |
+| `/wearable` | Connect and sync Fitbit / WHOOP / Oura |
 
-## Learn More
+## Project conventions
 
-To learn more about Next.js, take a look at the following resources:
-
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
-
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
-
-## Deploy on Vercel
-
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
-
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+- Shared design tokens live in `app/globals.css` as CSS custom properties (`--ink`, `--brand`, `--paper-card`, etc.) — used in both light and dark themes.
+- All PII-bearing data sent to external services flows through the backend's two-tier anonymization layer; the frontend never bypasses it.
+- Wallet state is managed by `@solana/wallet-adapter-react` and exposed globally via the nav-bar wallet button.

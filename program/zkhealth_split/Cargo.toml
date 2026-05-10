@@ -1,0 +1,19 @@
+[package]
+name = "zkhealth_split"
+version = "0.1.0"
+edition = "2021"
+description = "Atomic per-query SOL split for the ZKHealth marketplace."
+
+[lib]
+crate-type = ["cdylib", "lib"]
+name = "zkhealth_split"
+
+[features]
+default = []
+cpi = ["no-entrypoint"]
+no-entrypoint = []
+no-idl = []
+no-log-ix-name = []
+
+[dependencies]
+anchor-lang = "0.30.0"

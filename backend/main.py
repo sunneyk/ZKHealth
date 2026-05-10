@@ -1,4 +1,4 @@
-"""ZKHealth demo backend — FastAPI."""
+"""ZKHealth backend — FastAPI."""
 from __future__ import annotations
 
 import asyncio
@@ -9,6 +9,14 @@ import sys
 import uuid
 from pathlib import Path
 
+# Load .env from the project root so things like TREASURY_KEYPAIR_PATH and
+# ANTHROPIC_API_KEY are available to subprocess bridges.
+try:
+    from dotenv import load_dotenv
+    load_dotenv(Path(__file__).parent.parent / ".env")
+except ImportError:
+    pass
+
 from fastapi import FastAPI, HTTPException, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, RedirectResponse, Response
@@ -17,9 +25,10 @@ from pydantic import BaseModel, Field
 sys.path.insert(0, str(Path(__file__).parent))
 
 import db as database
+from anonymize import anonymize as scrub_pii
 from ingest import extract_pdf_text, parse_lab_observations, parse_wearable_csv
 from ingest_apple_health import parse_apple_health_zip
-from market import get_anonymized_snapshot, anonymized_preview
+from market import get_anonymized_snapshot, get_snapshot_summary, anonymized_preview
 
 app = FastAPI(title="ZKHealth Demo")
 
@@ -49,33 +58,52 @@ async def upload_file(file: UploadFile = File(...)):
     filename = file.filename or "upload"
     ext = Path(filename).suffix.lower()
 
+    from zk.attestation import attest_observations_batch
+
+    async def _save_obs_batch(doc_id: str, obs_specs: list[dict]) -> int:
+        """Save observations + batch-attest them in one Node call. Returns count."""
+        if not obs_specs:
+            return 0
+        with_ids = []
+        for o in obs_specs:
+            obs_id = database.save_observation(doc_id, o["canonical_name"], o["value"], o["unit"], o["date_effective"])
+            with_ids.append({
+                "obs_id": obs_id,
+                "canonical_name": o["canonical_name"],
+                "value": o["value"],
+                "date_effective": o["date_effective"],
+            })
+        payloads = await asyncio.to_thread(attest_observations_batch, with_ids)
+        for p in payloads:
+            database.save_attestation(p["obs_id"], p)
+        return len(with_ids)
+
+    def _save_doc_with_tier2(filename: str, doc_type: str, content: str) -> tuple[str, dict]:
+        """Save the raw document (Tier 1) and immediately write its anonymized
+        copy (Tier 2). Returns (doc_id, redaction_counts)."""
+        doc_id = database.save_document(filename, doc_type, content)
+        anon, counts = scrub_pii(content)
+        database.save_tier2(doc_id, anon, counts)
+        return doc_id, counts
+
     if ext == ".pdf":
         text = extract_pdf_text(file_bytes)
-        doc_id = database.save_document(filename, "lab_pdf", text)
+        doc_id, redactions = _save_doc_with_tier2(filename, "lab_pdf", text)
         obs_list = parse_lab_observations(text)
-        obs_ids = []
-        for obs in obs_list:
-            obs_id = database.save_observation(
-                doc_id, obs["canonical_name"], obs["value"], obs["unit"], obs["date_effective"]
-            )
-            obs_ids.append(obs_id)
-            # Auto-attest each observation
-            from zk.attestation import attest_observation
-            payload = attest_observation(obs_id, obs["canonical_name"], obs["value"], obs["date_effective"])
-            database.save_attestation(obs_id, payload)
-        return {"doc_id": doc_id, "type": "lab_pdf", "observations_found": len(obs_list)}
+        for o in obs_list:
+            o.setdefault("unit", "")
+        count = await _save_obs_batch(doc_id, obs_list)
+        return {"doc_id": doc_id, "type": "lab_pdf", "observations_found": count, "pii_redactions": redactions}
 
     elif ext == ".csv":
         summary, rows = parse_wearable_csv(file_bytes)
-        doc_id = database.save_document(filename, "wearable_csv", summary)
-        # Save provable numeric metrics as observations so they can have ZK proofs
+        doc_id, redactions = _save_doc_with_tier2(filename, "wearable_csv", summary)
         _WEARABLE_UNITS = {
             "steps": "steps", "heart_rate_avg": "bpm", "heart_rate_resting": "bpm",
             "sleep_hours": "h", "hrv": "ms", "spo2": "%", "calories_burned": "kcal",
             "active_minutes": "min",
         }
-        from zk.attestation import attest_observation
-        obs_count = 0
+        specs: list[dict] = []
         for row in rows:
             date = row.get("date", "")
             for col, unit in _WEARABLE_UNITS.items():
@@ -85,28 +113,18 @@ async def upload_file(file: UploadFile = File(...)):
                     val = float(row[col])
                 except (ValueError, TypeError):
                     continue
-                obs_id = database.save_observation(doc_id, col, val, unit, date)
-                payload = attest_observation(obs_id, col, val, date)
-                database.save_attestation(obs_id, payload)
-                obs_count += 1
-        return {"doc_id": doc_id, "type": "wearable_csv", "rows": len(rows), "observations_found": obs_count}
+                specs.append({"canonical_name": col, "value": val, "unit": unit, "date_effective": date})
+        count = await _save_obs_batch(doc_id, specs)
+        return {"doc_id": doc_id, "type": "wearable_csv", "rows": len(rows), "observations_found": count, "pii_redactions": redactions}
 
     elif ext == ".zip":
         try:
             summary, obs_list = parse_apple_health_zip(file_bytes)
         except ValueError as e:
             raise HTTPException(status_code=400, detail=str(e)) from e
-        doc_id = database.save_document(filename, "apple_health", summary)
-        from zk.attestation import attest_observation
-        obs_count = 0
-        for obs in obs_list:
-            obs_id = database.save_observation(
-                doc_id, obs["canonical_name"], obs["value"], obs["unit"], obs["date_effective"]
-            )
-            payload = attest_observation(obs_id, obs["canonical_name"], obs["value"], obs["date_effective"])
-            database.save_attestation(obs_id, payload)
-            obs_count += 1
-        return {"doc_id": doc_id, "type": "apple_health", "observations_found": obs_count}
+        doc_id, redactions = _save_doc_with_tier2(filename, "apple_health", summary)
+        count = await _save_obs_batch(doc_id, obs_list)
+        return {"doc_id": doc_id, "type": "apple_health", "observations_found": count, "pii_redactions": redactions}
 
     else:
         raise HTTPException(status_code=400, detail="Unsupported file type. Upload a PDF, CSV, or Apple Health ZIP.")
@@ -123,7 +141,7 @@ class ChatRequest(BaseModel):
 async def chat(body: ChatRequest):
     """Send a message to the AI with all uploaded health data as context."""
     from llm import chat as llm_chat
-    context = database.get_all_content()
+    context = database.get_all_content_tier2()
     try:
         reply = await asyncio.to_thread(llm_chat, body.message, context)
         return {"reply": reply}
@@ -135,7 +153,7 @@ async def chat(body: ChatRequest):
 async def insights():
     """Generate a structured AI summary of the user's health data — flags, trends, doctor questions."""
     from llm import chat as llm_chat
-    context = database.get_all_content()
+    context = database.get_all_content_tier2()
     if not context.strip():
         raise HTTPException(status_code=400, detail="No health data uploaded yet.")
 
@@ -171,6 +189,15 @@ def delete_document(doc_id: str):
 @app.get("/api/observations")
 def list_observations():
     return database.get_observations()
+
+
+# ── Anonymization layer ──────────────────────────────────────────────────────
+
+
+@app.get("/api/anonymization/stats")
+def anonymization_stats():
+    """Aggregate counts of PII redacted by the Tier 2 anonymization layer."""
+    return database.get_tier2_stats()
 
 
 # ── ZK Prove ─────────────────────────────────────────────────────────────────
@@ -373,41 +400,81 @@ def list_proofs():
 
 @app.get("/api/zk/export/{proof_id}")
 async def export_proof(proof_id: str):
-    from zk.html_export import VERIFY_HTML
+    from zk.html_export import RANGE_VERIFY_HTML, VERIFY_HTML
 
     row = database.get_proof(proof_id)
     if row is None:
         raise HTTPException(status_code=404, detail="Proof not found.")
 
+    claim_type = row.get("claim_type", "threshold_lt")
     payload = row["payload"]
     vkey = json.loads((Path(__file__).parent.parent / "circuit" / "verification_key.json").read_text())
 
-    sigs = payload["public_signals"]
-    passes = sigs[0] == "1"
-    date_int = int(sigs[2]) if len(sigs) > 2 else 0
-    threshold_val = int(sigs[1]) / 1000 if len(sigs) > 1 else 0
+    if claim_type == "range":
+        sigs_h = payload["public_signals_high"]
+        sigs_l = payload["public_signals_low"]
+        date_int = int(sigs_h[2]) if len(sigs_h) > 2 else 0
+        in_range = sigs_h[0] == "1" and sigs_l[0] == "0"
+        canonical_obj = {
+            "proof_high": payload["proof_high"],
+            "public_signals_high": sigs_h,
+            "proof_low": payload["proof_low"],
+            "public_signals_low": sigs_l,
+        }
+        memo = "hb-zk:" + hashlib.sha256(json.dumps(canonical_obj, sort_keys=True).encode()).hexdigest()[:32]
+        digest = memo[len("hb-zk:"):]
 
-    memo = "hb-zk:" + hashlib.sha256(
-        json.dumps({"proof": payload["proof"], "public_signals": sigs}, sort_keys=True).encode()
-    ).hexdigest()[:32]
-    digest = memo[len("hb-zk:"):]
+        # threshold_display is stored as "70–99"; split for the template
+        td = row["threshold_display"]
+        low_str, high_str = (td.split("–", 1) + [""])[:2] if "–" in td else (td, td)
 
-    meta = {
-        "biomarker_name": row["biomarker_name"],
-        "claim_type": "threshold_lt",
-        "threshold_display": row["threshold_display"],
-        "solana_tx_id": row["solana_tx_id"],
-        "created_at": row["created_at"],
-    }
-    export_payload = {
-        "proof": payload["proof"],
-        "public_signals": sigs,
-        "passes": passes,
-        "date_int": date_int,
-        "memo_digest": digest,
-    }
+        meta = {
+            "biomarker_name": row["biomarker_name"],
+            "claim_type": claim_type,
+            "threshold_display": td,
+            "low": low_str,
+            "high": high_str,
+            "solana_tx_id": row["solana_tx_id"],
+            "created_at": row["created_at"],
+        }
+        export_payload = {
+            "proof_high": payload["proof_high"],
+            "signals_high": sigs_h,
+            "proof_low": payload["proof_low"],
+            "signals_low": sigs_l,
+            "passes": in_range,
+            "date_int": date_int,
+            "memo_digest": digest,
+            "canonical": json.dumps(canonical_obj, sort_keys=True),
+        }
+        html = _build_range_verify_html(proof_id, meta, export_payload, vkey, RANGE_VERIFY_HTML)
+    else:
+        sigs = payload["public_signals"]
+        raw_passes = sigs[0] == "1"
+        claim_passes = raw_passes if claim_type == "threshold_lt" else not raw_passes
+        date_int = int(sigs[2]) if len(sigs) > 2 else 0
 
-    html = _build_verify_html(proof_id, meta, export_payload, vkey, VERIFY_HTML)
+        memo = "hb-zk:" + hashlib.sha256(
+            json.dumps({"proof": payload["proof"], "public_signals": sigs}, sort_keys=True).encode()
+        ).hexdigest()[:32]
+        digest = memo[len("hb-zk:"):]
+
+        meta = {
+            "biomarker_name": row["biomarker_name"],
+            "claim_type": claim_type,
+            "threshold_display": row["threshold_display"],
+            "solana_tx_id": row["solana_tx_id"],
+            "created_at": row["created_at"],
+        }
+        export_payload = {
+            "proof": payload["proof"],
+            "public_signals": sigs,
+            "passes": claim_passes,
+            "date_int": date_int,
+            "memo_digest": digest,
+        }
+        html = _build_verify_html(proof_id, meta, export_payload, vkey, VERIFY_HTML)
+
     filename = f"zkhealth_proof_{proof_id[:8]}.html"
     return Response(
         content=html,
@@ -420,7 +487,6 @@ def _build_verify_html(proof_id, meta, payload, vkey, template):
     passes = payload["passes"]
     d = str(payload["date_int"])
     date_display = f"{d[:4]}-{d[4:6]}-{d[6:8]}" if len(d) == 8 else d
-    threshold_val = int(payload["public_signals"][1]) / 1000
 
     explorer_url = (
         f"https://explorer.solana.com/tx/{meta['solana_tx_id']}?cluster=devnet"
@@ -441,7 +507,7 @@ def _build_verify_html(proof_id, meta, payload, vkey, template):
     tokens = {
         "__TITLE__": f"{meta['biomarker_name']} · ZK Proof",
         "__BIOMARKER_NAME__": meta["biomarker_name"],
-        "__THRESHOLD_DISPLAY__": f"below {threshold_val:g}",
+        "__THRESHOLD_DISPLAY__": meta["threshold_display"],
         "__PASS_CLASS__": "badge-pass" if passes else "badge-fail",
         "__PASS_TEXT__": "✓ PASSES" if passes else "✗ DOES NOT PASS",
         "__DATE_DISPLAY__": date_display,
@@ -453,6 +519,50 @@ def _build_verify_html(proof_id, meta, payload, vkey, template):
         "__PUBLIC_SIGNALS_JSON__": _js(payload["public_signals"]),
         "__VKEY_JSON__": _js(vkey),
         "__CANONICAL_JSON__": _js(canonical),
+    }
+
+    html = template
+    for token, value in tokens.items():
+        html = html.replace(token, value)
+    return html
+
+
+def _build_range_verify_html(proof_id, meta, payload, vkey, template):
+    passes = payload["passes"]
+    d = str(payload["date_int"])
+    date_display = f"{d[:4]}-{d[4:6]}-{d[6:8]}" if len(d) == 8 else d
+
+    explorer_url = (
+        f"https://explorer.solana.com/tx/{meta['solana_tx_id']}?cluster=devnet"
+        if meta["solana_tx_id"] else ""
+    )
+    explorer_link = (
+        f'<a href="{explorer_url}" target="_blank" rel="noopener noreferrer">View on Solana Explorer &#x2197;</a>'
+        if explorer_url else "<span>No on-chain anchor</span>"
+    )
+
+    def _js(obj):
+        return json.dumps(obj).replace("</", "<\\/")
+
+    tokens = {
+        "__TITLE__": f"{meta['biomarker_name']} · ZK Range Proof",
+        "__BIOMARKER_NAME__": meta["biomarker_name"],
+        "__THRESHOLD_DISPLAY__": meta["threshold_display"],
+        "__LOW__": meta["low"],
+        "__HIGH__": meta["high"],
+        "__PASS_CLASS__": "badge-pass" if passes else "badge-fail",
+        "__PASS_TEXT__": "✓ IN RANGE" if passes else "✗ OUT OF RANGE",
+        "__DATE_DISPLAY__": date_display,
+        "__PROOF_ID_SHORT__": proof_id[:8],
+        "__MEMO__": f"hb-zk:{payload['memo_digest']}",
+        "__MEMO_DIGEST__": payload["memo_digest"],
+        "__EXPLORER_LINK__": explorer_link,
+        "__PROOF_HIGH_JSON__": _js(payload["proof_high"]),
+        "__SIGNALS_HIGH_JSON__": _js(payload["signals_high"]),
+        "__PROOF_LOW_JSON__": _js(payload["proof_low"]),
+        "__SIGNALS_LOW_JSON__": _js(payload["signals_low"]),
+        "__VKEY_JSON__": _js(vkey),
+        "__CANONICAL_JSON__": _js(payload["canonical"]),
     }
 
     html = template
@@ -527,25 +637,41 @@ def market_preview():
     return anonymized_preview(all_obs, listed_canonicals)
 
 
+@app.get("/api/market/treasury")
+def market_treasury():
+    """Return the treasury wallet's pubkey — the address researchers should pay."""
+    from chain.solana_anchor import get_treasury_pubkey
+    try:
+        return {"pubkey": get_treasury_pubkey()}
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
 @app.post("/api/market/access")
 async def market_access(body: AccessBody):
-    recipient_pubkey = database.get_setting("solana_wallet_pubkey")
-    if not recipient_pubkey:
-        raise HTTPException(status_code=400, detail="No wallet saved. Save your Solana wallet on the ZK Proofs page first.")
+    from chain.solana_anchor import get_treasury_pubkey, release_to
+
+    data_owner_pubkey = database.get_setting("solana_wallet_pubkey")
+    if not data_owner_pubkey:
+        raise HTTPException(status_code=400, detail="No data owner wallet saved. Save your wallet on the ZK Proofs page first.")
 
     listings = database.get_listings()
     if not listings:
         raise HTTPException(status_code=400, detail="No active listings. Add biomarkers to the marketplace first.")
 
+    try:
+        treasury_pubkey = get_treasury_pubkey()
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Treasury unavailable: {exc}") from exc
+
     min_price = min(l["price_lamports"] for l in listings)
 
+    # 1. Verify the researcher's payment landed in the TREASURY, not the data owner's wallet.
     try:
         proc = await asyncio.to_thread(
             subprocess.run,
-            ["node", str(_PAYMENT_VERIFY), body.tx_signature, recipient_pubkey, str(min_price)],
-            capture_output=True,
-            text=True,
-            timeout=15,
+            ["node", str(_PAYMENT_VERIFY), body.tx_signature, treasury_pubkey, str(min_price)],
+            capture_output=True, text=True, timeout=15,
         )
         verify_result = json.loads(proc.stdout)
     except subprocess.TimeoutExpired:
@@ -560,9 +686,23 @@ async def market_access(body: AccessBody):
     sender = verify_result.get("sender", body.researcher_pubkey)
     researcher_pubkey = body.researcher_pubkey or sender
 
+    # 2. Compute the contributor split.
     all_obs = database.get_observations()
     listed_canonicals = {l["canonical_name"] for l in listings}
-    snapshot = get_anonymized_snapshot(all_obs, listed_canonicals)
+    snapshot = get_anonymized_snapshot(all_obs, listed_canonicals)        # per-row
+    summary = get_snapshot_summary(all_obs, listed_canonicals)            # per-biomarker counts
+    total_contributors = max((row["n_contributors"] for row in summary), default=1)
+    data_owner_share = lamports // total_contributors
+
+    # 3. Release the data owner's share from treasury via on-chain transfer.
+    # The remaining (N-1)/N is allocated against the contributor pool and
+    # released as those contributor wallets are settled.
+    release_tx = ""
+    release_error = ""
+    try:
+        release_tx = await release_to(data_owner_pubkey, max(data_owner_share, 1))
+    except Exception as exc:
+        release_error = str(exc)
 
     grant_id = database.add_grant(
         body.tx_signature,
@@ -575,7 +715,13 @@ async def market_access(body: AccessBody):
         "verified": True,
         "grant_id": grant_id,
         "lamports": lamports,
-        "data": snapshot,
+        "treasury_pubkey": treasury_pubkey,
+        "release_tx": release_tx,
+        "release_error": release_error,
+        "release_lamports": data_owner_share,
+        "n_contributors": total_contributors,
+        "data": snapshot,            # per-row anonymized readings
+        "summary": summary,          # per-biomarker counts
     }
 
 
@@ -631,29 +777,31 @@ _DEMO_LAB_PANEL: list[tuple[str, list[tuple[str, float]], str]] = [
 @app.post("/api/demo/load")
 async def demo_load():
     """Seed the database with a sample lab panel + wearable CSV. Idempotent — skips if demo data already loaded."""
-    from datetime import date as _date
-    from zk.attestation import attest_observation
+    from zk.attestation import attest_observations_batch
 
-    # Skip if a demo lab doc is already in the DB
     existing = database.get_documents()
     already = any(d["filename"].startswith("demo_") for d in existing)
     if already:
         return {"already_loaded": True, "documents": len(existing)}
 
+    # Build the full list of (doc_id, canonical, value, unit, date) tuples first,
+    # save observations, then batch-attest them all in one Node call.
+    pending: list[dict] = []
+
     # Lab panel — one document per visit date so the dashboard groups by visit
-    lab_count = 0
     visit_dates = sorted({d for _, readings, _ in _DEMO_LAB_PANEL for d, _ in readings})
-    visit_docs: dict[str, str] = {}
-    for v_date in visit_dates:
-        visit_docs[v_date] = database.save_document(
+    visit_docs = {
+        v_date: database.save_document(
             f"demo_bloodwork_{v_date}.pdf", "lab_pdf",
             f"Comprehensive metabolic + lipid + vitamin panel — collected {v_date} (demo).",
         )
+        for v_date in visit_dates
+    }
+    lab_count = 0
     for canonical, readings, unit in _DEMO_LAB_PANEL:
         for d, value in readings:
             obs_id = database.save_observation(visit_docs[d], canonical, value, unit, d)
-            payload = await asyncio.to_thread(attest_observation, obs_id, canonical, value, d)
-            database.save_attestation(obs_id, payload)
+            pending.append({"obs_id": obs_id, "canonical_name": canonical, "value": value, "date_effective": d})
             lab_count += 1
 
     # Wearable CSV
@@ -679,9 +827,13 @@ async def demo_load():
                 except (ValueError, TypeError):
                     continue
                 obs_id = database.save_observation(wearable_doc_id, col, val, unit, d)
-                payload = await asyncio.to_thread(attest_observation, obs_id, col, val, d)
-                database.save_attestation(obs_id, payload)
+                pending.append({"obs_id": obs_id, "canonical_name": col, "value": val, "date_effective": d})
                 wearable_count += 1
+
+    # ONE Node subprocess for all hashes (~1.5s instead of ~30s)
+    payloads = await asyncio.to_thread(attest_observations_batch, pending)
+    for p in payloads:
+        database.save_attestation(p["obs_id"], p)
 
     return {
         "already_loaded": False,
@@ -715,6 +867,48 @@ def _wearable_callback_html(label: str, ok: bool, message: str = "") -> HTMLResp
 def wearable_list():
     import wearable
     return wearable.list_status()
+
+
+class WearableCredentialsBody(BaseModel):
+    client_id: str
+    client_secret: str
+    redirect_uri: str = ""
+
+
+@app.post("/api/wearable/{provider}/credentials")
+def wearable_save_credentials(provider: str, body: WearableCredentialsBody):
+    import wearable
+    from wearable._common import cred_set
+
+    try:
+        wearable.get(provider)
+    except KeyError as e:
+        raise HTTPException(status_code=404, detail=str(e)) from e
+
+    cid = body.client_id.strip()
+    csec = body.client_secret.strip()
+    if not cid or not csec:
+        raise HTTPException(status_code=422, detail="Both client_id and client_secret are required")
+
+    cred_set(provider, "client_id", cid)
+    cred_set(provider, "client_secret", csec)
+    if body.redirect_uri.strip():
+        cred_set(provider, "redirect_uri", body.redirect_uri.strip())
+    return {"ok": True, "provider": provider}
+
+
+@app.delete("/api/wearable/{provider}/credentials")
+def wearable_clear_credentials(provider: str):
+    import wearable
+    from wearable._common import cred_clear
+
+    try:
+        wearable.get(provider)
+    except KeyError as e:
+        raise HTTPException(status_code=404, detail=str(e)) from e
+
+    cred_clear(provider)
+    return {"ok": True, "provider": provider}
 
 
 @app.get("/api/wearable/{provider}/status")

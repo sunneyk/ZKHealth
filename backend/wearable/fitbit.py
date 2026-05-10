@@ -16,19 +16,19 @@ _SCOPES = "activity heartrate sleep profile"
 
 
 def _client_id() -> str:
-    return c.env_required("FITBIT_CLIENT_ID", "Fitbit client ID")
+    return c.cred_required(PROVIDER, "client_id", "Fitbit client ID")
 
 
 def _client_secret() -> str:
-    return c.env_required("FITBIT_CLIENT_SECRET", "Fitbit client secret")
+    return c.cred_required(PROVIDER, "client_secret", "Fitbit client secret")
 
 
 def _redirect_uri() -> str:
-    return c.env_optional("FITBIT_REDIRECT_URI", "http://localhost:8000/api/wearable/fitbit/callback")
+    return c.cred_get(PROVIDER, "redirect_uri") or "http://localhost:8000/api/wearable/fitbit/callback"
 
 
 def is_configured() -> bool:
-    return bool(c.env_optional("FITBIT_CLIENT_ID"))
+    return bool(c.cred_get(PROVIDER, "client_id"))
 
 
 def get_status() -> dict:
@@ -78,44 +78,43 @@ def sync_data(days: int = 7) -> dict:
     s, e = start.isoformat(), today.isoformat()
 
     doc_id = c.begin_sync_doc(PROVIDER, LABEL, s, e)
-    count = 0
+    specs: list[dict] = []
+
+    def _add(date_str, canonical, value, unit):
+        spec = c.save_obs_pending(doc_id, canonical, value, unit, date_str)
+        if spec:
+            specs.append(spec)
 
     with httpx.Client(base_url=_API_BASE) as client:
-        # Steps
         r = client.get(f"/1/user/-/activities/steps/date/{s}/{e}.json", headers=headers)
         if r.is_success:
             for item in r.json().get("activities-steps", []):
-                count += c.save_synced_observation(doc_id, "steps", float(item["value"]), "steps", item["dateTime"])
+                _add(item["dateTime"], "steps", item["value"], "steps")
 
-        # Calories
         r = client.get(f"/1/user/-/activities/calories/date/{s}/{e}.json", headers=headers)
         if r.is_success:
             for item in r.json().get("activities-calories", []):
-                count += c.save_synced_observation(doc_id, "calories_burned", float(item["value"]), "kcal", item["dateTime"])
+                _add(item["dateTime"], "calories_burned", item["value"], "kcal")
 
-        # Active minutes (fairly + very)
         r_fair = client.get(f"/1/user/-/activities/minutesFairlyActive/date/{s}/{e}.json", headers=headers)
         r_very = client.get(f"/1/user/-/activities/minutesVeryActive/date/{s}/{e}.json", headers=headers)
         if r_fair.is_success and r_very.is_success:
             fair_map = {x["dateTime"]: float(x["value"]) for x in r_fair.json().get("activities-minutesFairlyActive", [])}
             for item in r_very.json().get("activities-minutesVeryActive", []):
                 dt = item["dateTime"]
-                count += c.save_synced_observation(doc_id, "active_minutes", float(item["value"]) + fair_map.get(dt, 0.0), "min", dt)
+                _add(dt, "active_minutes", float(item["value"]) + fair_map.get(dt, 0.0), "min")
 
-        # Resting heart rate
         r = client.get(f"/1/user/-/activities/heart/date/{s}/{e}.json", headers=headers)
         if r.is_success:
             for item in r.json().get("activities-heart", []):
                 rhr = item.get("value", {}).get("restingHeartRate")
-                if rhr:
-                    count += c.save_synced_observation(doc_id, "resting_heart_rate", float(rhr), "bpm", item["dateTime"])
+                _add(item["dateTime"], "resting_heart_rate", rhr, "bpm")
 
-        # Sleep (main only)
         r = client.get(f"/1.2/user/-/sleep/date/{s}/{e}.json", headers=headers)
         if r.is_success:
             for entry in r.json().get("sleep", []):
                 if entry.get("isMainSleep"):
                     minutes = entry.get("minutesAsleep", 0)
-                    count += c.save_synced_observation(doc_id, "sleep_hours", round(minutes / 60, 2), "h", entry["dateOfSleep"])
+                    _add(entry["dateOfSleep"], "sleep_hours", round(minutes / 60, 2), "h")
 
-    return c.finalize_sync(PROVIDER, e, doc_id, count, s)
+    return c.finalize_sync(PROVIDER, e, doc_id, specs, s)

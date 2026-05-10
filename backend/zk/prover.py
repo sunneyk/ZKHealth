@@ -1,4 +1,9 @@
-"""Simplified ZK prover for ZKHealth demo."""
+"""Groth16 proof generation via snarkjs.
+
+Loads the compiled `threshold_attestation` circuit, builds the witness from a
+signed attestation + threshold, and produces a proof binding the commitment to
+the threshold-comparison output.
+"""
 from __future__ import annotations
 
 import json
