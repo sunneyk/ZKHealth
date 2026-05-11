@@ -3,10 +3,11 @@
 Noise is added via the Laplace mechanism with ε = 1.0, giving a formal
 ε-differential privacy guarantee for each mean query.
 
-Mock backing contributors are mixed into every aggregate so judges see what a
-real multi-user marketplace would look like. In production these would be real
-opted-in users; payments would route through a Solana program with PDA-based
-escrow that splits SOL across contributors atomically.
+Synthetic backing contributors are mixed into every aggregate so the
+marketplace shows realistic distributions even with a small real-user base.
+In production these would be real opted-in users; payments would route through
+a Solana program with PDA-based escrow that splits SOL across contributors
+atomically.
 """
 from __future__ import annotations
 

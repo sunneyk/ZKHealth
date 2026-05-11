@@ -177,12 +177,9 @@ Per-biomarker aggregates use the Laplace mechanism with ε = 1.0 — sensitivity
 │       ├── page.tsx            Chat
 │       ├── dashboard/          Lab + wearable dashboard
 │       ├── zk/                 Proof generation, verification, public share
-│       ├── market/             Biomarker marketplace
-│       ├── wearable/           Provider connections
-│       └── components/         NavHeader, Modal, UploadContext, ThemeToggle
-│
-└── sample_data/
-    └── sample_wearables.csv
+    ├── market/             Biomarker marketplace
+    ├── wearable/           Provider connections
+    └── components/         NavHeader, Modal, UploadContext, ThemeToggle
 ```
 
 ---

@@ -195,6 +195,14 @@ input::placeholder, textarea::placeholder { color: var(--ink-4); }
   letter-spacing: -0.025em;
   font-size: 28px; font-weight: 400; line-height: 1.1;
 }
+.page-eyebrow {
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--ink-4);
+  margin-bottom: 4px;
+}
 .page-subtitle { color: var(--ink-3); font-size: 13px; margin-top: 4px; }
 
 .section-label {
@@ -725,6 +733,17 @@ input[type="number"].form-input::-webkit-outer-spin-button {
 
 .solana-link { color: var(--brand); font-size: 11px; text-decoration: none; transition: opacity 140ms; }
 .solana-link:hover { opacity: 0.7; }
+/* Button reset for inline link-styled buttons. Prevents the Dark Reader
+   extension from rewriting inline `style={...}` resets and causing SSR
+   hydration mismatches. */
+button.solana-link {
+  background: none;
+  border: none;
+  padding: 0;
+  margin: 0;
+  font: inherit;
+  cursor: pointer;
+}
 
 .proof-chain-link {
   color: var(--brand);
@@ -1198,6 +1217,196 @@ input[type="number"].form-input::-webkit-outer-spin-button {
   border-style: solid;
 }
 
+/* ── Research-study cards (ZK Proofs page) ────────────────── */
+.study-section-body {
+  padding: 4px 16px 16px !important;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.study-section-hint {
+  font-size: 11.5px;
+  color: var(--ink-3);
+  line-height: 1.5;
+}
+.study-scroll {
+  display: flex;
+  gap: 10px;
+  overflow-x: auto;
+  padding: 4px 0 10px 0;
+  scroll-snap-type: x mandatory;
+  -webkit-overflow-scrolling: touch;
+}
+.study-scroll::-webkit-scrollbar { height: 8px; }
+.study-scroll::-webkit-scrollbar-track { background: transparent; }
+.study-scroll::-webkit-scrollbar-thumb {
+  background: var(--rule-s);
+  border-radius: 4px;
+}
+.study-scroll::-webkit-scrollbar-thumb:hover { background: var(--ink-4); }
+
+.study-card {
+  flex: 0 0 268px;
+  scroll-snap-align: start;
+  background: var(--paper-sunk);
+  border: 0.5px solid var(--rule-s);
+  border-radius: var(--r-md);
+  padding: 12px 13px;
+  cursor: pointer;
+  text-align: left;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  transition: background 0.15s, border-color 0.15s;
+  font-family: inherit;
+  color: var(--ink);
+}
+.study-card:hover {
+  border-color: var(--ink-4);
+  background: var(--hover);
+}
+.study-card-qualifies { border-color: var(--sage); }
+.study-card-qualifies:hover { border-color: var(--sage); background: var(--sage-wash); }
+.study-card-no-match { opacity: 0.55; }
+.study-card-no-match:hover { opacity: 0.85; }
+
+.study-card-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.study-card-institution {
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--ink-3);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  font-family: var(--font-mono);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.study-card-pill {
+  font-size: 9px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  padding: 2px 7px;
+  border-radius: var(--r-pill);
+  background: var(--sage-wash);
+  color: var(--sage-ink);
+  border: 0.5px solid var(--sage);
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+.study-card-pill-muted {
+  background: transparent;
+  color: var(--ink-3);
+  border-color: var(--rule-s);
+}
+.study-card-title {
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--ink);
+  line-height: 1.35;
+  letter-spacing: -0.005em;
+}
+.study-card-criteria {
+  font-size: 11px;
+  color: var(--ink-3);
+  line-height: 1.4;
+  flex: 1;
+  font-variant-numeric: tabular-nums;
+}
+.study-card-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  padding-top: 6px;
+  border-top: 0.5px solid var(--rule-s);
+}
+.study-card-comp {
+  font-size: 10.5px;
+  color: var(--ink-2);
+  font-weight: 500;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.study-card-meta {
+  font-size: 10px;
+  color: var(--ink-3);
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+/* Modal body for study apply */
+.study-modal-body { display: flex; flex-direction: column; gap: 16px; }
+.study-modal-description {
+  font-size: 12.5px;
+  color: var(--ink-2);
+  line-height: 1.55;
+}
+.study-modal-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+  padding: 12px;
+  background: var(--paper-sunk);
+  border: 0.5px solid var(--rule-s);
+  border-radius: var(--r-md);
+}
+.study-modal-cell { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+.study-modal-label {
+  font-size: 9.5px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--ink-3);
+}
+.study-modal-value {
+  font-size: 12px;
+  color: var(--ink);
+  font-weight: 500;
+}
+.study-modal-section { display: flex; flex-direction: column; gap: 4px; }
+.study-modal-section-label {
+  font-size: 9.5px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--ink-3);
+}
+.study-modal-eligibility {
+  font-size: 13px;
+  color: var(--ink);
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+}
+.study-modal-match {
+  font-size: 12px;
+  line-height: 1.5;
+  padding: 10px 12px;
+  border-radius: var(--r-md);
+  border: 0.5px solid var(--rule-s);
+}
+.study-modal-match-pass {
+  background: var(--sage-wash);
+  border-color: var(--sage);
+  color: var(--sage-ink);
+}
+.study-modal-match-fail {
+  background: var(--terra-wash);
+  border-color: var(--terra);
+  color: var(--terra-ink);
+}
+.study-modal-match-missing {
+  background: var(--paper-sunk);
+  color: var(--ink-3);
+}
+
 /* ── Wearable provider cards ──────────────────────────────── */
 .provider-glyph {
   width: 38px; height: 38px;
@@ -1658,6 +1867,58 @@ input[type="number"].form-input::-webkit-outer-spin-button {
   opacity: 1;
   transform: translateY(0);
   pointer-events: auto;
+}
+
+/* ── Market nav hover dropdown ────────────────────────────── */
+.market-nav-anchor {
+  position: relative;
+  display: inline-flex;
+}
+/* Pad the hover zone below the link so the menu opens without leaving the
+   hover area. */
+.market-nav-anchor::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 100%;
+  height: 10px;
+}
+.market-nav-menu {
+  position: absolute;
+  top: calc(100% + 8px);
+  left: 0;
+  min-width: 232px;
+  background: var(--paper-card);
+  border: 0.5px solid var(--rule-s);
+  border-radius: var(--r-md);
+  box-shadow: var(--shadow-hi);
+  padding: 5px;
+  z-index: 50;
+  animation: walletMenuIn 0.12s var(--ease-out);
+}
+.market-nav-item {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 9px 11px;
+  border-radius: var(--r-sm);
+  text-decoration: none;
+  color: var(--ink);
+  transition: background 0.12s;
+}
+.market-nav-item + .market-nav-item { margin-top: 1px; }
+.market-nav-item:hover { background: var(--hover); }
+.market-nav-item-label {
+  font-size: 12.5px;
+  font-weight: 500;
+  color: var(--ink);
+  line-height: 1.3;
+}
+.market-nav-item-hint {
+  font-size: 10.5px;
+  color: var(--ink-3);
+  line-height: 1.3;
 }
 
 /* ── Currency toggle (SOL / USDC) ─────────────────────────── */

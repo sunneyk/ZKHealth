@@ -149,9 +149,37 @@ def delete_document(doc_id: str) -> None:
     )
     conn.execute("DELETE FROM observations WHERE doc_id = ?", (doc_id,))
     conn.execute("DELETE FROM documents_tier2 WHERE doc_id = ?", (doc_id,))
+    # Drop any market listings whose canonical no longer has an observation.
+    conn.execute(
+        "DELETE FROM market_listings "
+        "WHERE canonical_name NOT IN (SELECT DISTINCT canonical_name FROM observations)"
+    )
     conn.execute("DELETE FROM documents WHERE doc_id = ?", (doc_id,))
     conn.commit()
     conn.close()
+
+
+def reset_user_data() -> dict:
+    """Wipe documents (Tier 1 + Tier 2), observations, attestations, ZK proofs,
+    and all marketplace listings + grants. Leaves wallet pubkey, wearable
+    credentials, and other device settings intact. For testing only."""
+    tables = [
+        "zk_proofs",
+        "zk_attestations",
+        "observations",
+        "documents_tier2",
+        "market_listings",
+        "market_grants",
+        "documents",
+    ]
+    conn = get_conn()
+    counts: dict[str, int] = {}
+    for t in tables:
+        counts[t] = conn.execute(f"SELECT COUNT(*) FROM {t}").fetchone()[0]
+        conn.execute(f"DELETE FROM {t}")
+    conn.commit()
+    conn.close()
+    return counts
 
 
 def get_observations() -> list[dict]:
@@ -313,18 +341,18 @@ def set_setting(key: str, value: str) -> None:
 def get_listings() -> list[dict]:
     conn = get_conn()
     rows = conn.execute(
-        "SELECT listing_id, canonical_name, price_lamports, active, created_at FROM market_listings WHERE active=1 ORDER BY created_at"
+        "SELECT listing_id, canonical_name, active, created_at FROM market_listings WHERE active=1 ORDER BY created_at"
     ).fetchall()
     conn.close()
     return [dict(r) for r in rows]
 
 
-def add_listing(canonical_name: str, price_lamports: int) -> str:
+def add_listing(canonical_name: str) -> str:
     listing_id = uuid.uuid4().hex
     conn = get_conn()
     conn.execute(
-        "INSERT OR IGNORE INTO market_listings (listing_id, canonical_name, price_lamports) VALUES (?,?,?)",
-        (listing_id, canonical_name, price_lamports),
+        "INSERT OR IGNORE INTO market_listings (listing_id, canonical_name) VALUES (?,?)",
+        (listing_id, canonical_name),
     )
     # If it already existed (IGNORE), retrieve the existing id
     row = conn.execute("SELECT listing_id FROM market_listings WHERE canonical_name = ?", (canonical_name,)).fetchone()

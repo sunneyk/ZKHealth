@@ -6,7 +6,7 @@ signed so a downstream verifier can confirm the value-threshold proof refers
 to a real ingested observation, not a value invented by the prover.
 
 Production would issue Ed25519 keypairs to trusted sources (lab partners,
-wearable providers); the local pipeline uses a fixed HMAC key to keep the
+wearable providers); this implementation uses a fixed HMAC key to keep the
 verification path self-contained.
 """
 from __future__ import annotations

@@ -4,7 +4,7 @@ Tier 1 (`documents` table)        — raw content as ingested. Never sent to any
                                     external service. Used only for local
                                     proof generation and direct user view.
 Tier 2 (`documents_tier2` table)  — regex-scrubbed copy. This is what gets
-                                    handed to Claude as chat context.
+                                    handed to the LLM as chat context.
 
 Six deterministic patterns. No NER, no LLM, no whitelists. If a pattern matches,
 the span is replaced with `[REDACTED-<tag>]`.

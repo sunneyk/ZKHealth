@@ -1,6 +1,6 @@
 "use client";
 import Link from "next/link";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useWallet } from "@solana/wallet-adapter-react";
 import { toast } from "sonner";
 import { ThemeToggle } from "./ThemeToggle";
@@ -123,6 +123,76 @@ function NavWalletButton() {
   );
 }
 
+function MarketNavDropdown({ uploading, onBlock }: {
+  uploading: boolean;
+  onBlock: (e: React.MouseEvent) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const closeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  function show() {
+    if (closeTimer.current) {
+      clearTimeout(closeTimer.current);
+      closeTimer.current = null;
+    }
+    setOpen(true);
+  }
+  function scheduleHide() {
+    if (closeTimer.current) clearTimeout(closeTimer.current);
+    closeTimer.current = setTimeout(() => setOpen(false), 140);
+  }
+
+  useEffect(() => {
+    if (!open) return;
+    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") setOpen(false); };
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, [open]);
+
+  return (
+    <div
+      className="market-nav-anchor"
+      onMouseEnter={show}
+      onMouseLeave={scheduleHide}
+      onFocus={show}
+      onBlur={scheduleHide}
+    >
+      <Link
+        href="/market"
+        className="nav-link"
+        onClick={onBlock}
+        aria-disabled={uploading || undefined}
+        aria-haspopup="menu"
+        aria-expanded={open}
+      >
+        Market
+      </Link>
+      {open && (
+        <div className="market-nav-menu" role="menu">
+          <Link
+            href="/market?tab=buy"
+            className="market-nav-item"
+            role="menuitem"
+            onClick={(e) => { onBlock(e); setOpen(false); }}
+          >
+            <span className="market-nav-item-label">Buy data</span>
+            <span className="market-nav-item-hint">Browse anonymized snapshots</span>
+          </Link>
+          <Link
+            href="/market?tab=sell"
+            className="market-nav-item"
+            role="menuitem"
+            onClick={(e) => { onBlock(e); setOpen(false); }}
+          >
+            <span className="market-nav-item-label">Sell my data</span>
+            <span className="market-nav-item-hint">List biomarkers from your uploads</span>
+          </Link>
+        </div>
+      )}
+    </div>
+  );
+}
+
 export function NavHeader() {
   const { uploading, fileName } = useUpload();
 
@@ -145,17 +215,25 @@ export function NavHeader() {
         <div className="flex items-center gap-5">
           <span className="nav-brand">ZKHealth</span>
           <nav className="flex items-center gap-0.5">
-            {LINKS.map((l) => (
-              <Link
-                key={l.href}
-                href={l.href}
-                className="nav-link"
-                onClick={blockIfUploading}
-                aria-disabled={uploading || undefined}
-              >
-                {l.label}
-              </Link>
-            ))}
+            {LINKS.map((l) =>
+              l.href === "/market" ? (
+                <MarketNavDropdown
+                  key={l.href}
+                  uploading={uploading}
+                  onBlock={blockIfUploading}
+                />
+              ) : (
+                <Link
+                  key={l.href}
+                  href={l.href}
+                  className="nav-link"
+                  onClick={blockIfUploading}
+                  aria-disabled={uploading || undefined}
+                >
+                  {l.label}
+                </Link>
+              ),
+            )}
           </nav>
         </div>
         <div className="flex items-center gap-2">

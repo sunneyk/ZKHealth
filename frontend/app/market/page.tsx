@@ -1,17 +1,21 @@
 "use client";
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
+import { useSearchParams, useRouter, usePathname } from "next/navigation";
 import { useWallet, useConnection } from "@solana/wallet-adapter-react";
 import { SystemProgram, Transaction, PublicKey, LAMPORTS_PER_SOL } from "@solana/web3.js";
 import { toast } from "sonner";
+import { biomarkerLabel } from "../lib/biomarkerLabel";
 
 const API = "http://127.0.0.1:8000";
-const LAMPORTS_PER_QUERY = 1_000_000; // 0.001 SOL
+// Researcher price scales with cohort size: total = unit × n_contributors,
+// so each contributor's per-capita share stays constant regardless of N.
+// The authoritative quote comes from GET /api/market/quote.
+const FALLBACK_UNIT_PRICE = 1_000_000;
 
 // ── Types ──────────────────────────────────────────────────────
 type Listing = {
   listing_id: string;
   canonical_name: string;
-  price_lamports: number;
   active: number;
   created_at: string;
 };
@@ -59,17 +63,15 @@ type PurchaseResult = {
   release_lamports?: number;
   n_contributors?: number;
 };
-type Earnings = { total_lamports: number; grant_count: number };
+type Earnings = {
+  total_lamports: number;
+  grant_count: number;
+  per_grant_share_lamports?: number;
+  n_listings?: number;
+};
 
 // ── Helpers ────────────────────────────────────────────────────
-function formatCanonical(name: string): string {
-  return name.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
-}
-
-function truncatePubkey(pk: string): string {
-  if (!pk || pk.length < 12) return pk;
-  return `${pk.slice(0, 6)}…${pk.slice(-4)}`;
-}
+const formatCanonical = biomarkerLabel;
 
 function csvEscape(value: unknown): string {
   const s = value === null || value === undefined ? "" : String(value);
@@ -205,6 +207,11 @@ export default function MarketPage() {
   const [grants, setGrants] = useState<Grant[]>([]);
   const [preview, setPreview] = useState<PreviewRow[]>([]);
   const [earnings, setEarnings] = useState<Earnings>({ total_lamports: 0, grant_count: 0 });
+  const [quote, setQuote] = useState<{ n_contributors: number; total_price_lamports: number; unit_price_lamports: number }>({
+    n_contributors: 0,
+    total_price_lamports: 0,
+    unit_price_lamports: FALLBACK_UNIT_PRICE,
+  });
   const [recipientPubkey, setRecipientPubkey] = useState("");
   const [treasuryPubkey, setTreasuryPubkey] = useState("");
   const [purchasing, setPurchasing] = useState(false);
@@ -213,6 +220,31 @@ export default function MarketPage() {
   const [bulkToggling, setBulkToggling] = useState(false);
   const [currency, setCurrency] = useState<"SOL" | "USDC">("SOL");
   const [solPrice, setSolPrice] = useState<number>(140); // fallback if CoinGecko is unreachable
+  // Role tab. URL query (?tab=buy|sell) wins; otherwise default chosen once
+  // after first fetch lands — sell if the user has uploads, buy if not.
+  const searchParams = useSearchParams();
+  const router = useRouter();
+  const pathname = usePathname();
+  const urlTab = searchParams.get("tab");
+  const initialTab: "sell" | "buy" = urlTab === "buy" || urlTab === "sell" ? urlTab : "sell";
+  const [tab, setTabState] = useState<"sell" | "buy">(initialTab);
+  const tabInitializedRef = useRef(urlTab === "buy" || urlTab === "sell");
+
+  function setTab(next: "sell" | "buy") {
+    setTabState(next);
+    const params = new URLSearchParams(searchParams.toString());
+    params.set("tab", next);
+    router.replace(`${pathname}?${params.toString()}`, { scroll: false });
+  }
+
+  // React to back/forward navigation that swaps ?tab=
+  useEffect(() => {
+    if (urlTab === "buy" || urlTab === "sell") {
+      // eslint-disable-next-line react-hooks/set-state-in-effect
+      setTabState(urlTab);
+      tabInitializedRef.current = true;
+    }
+  }, [urlTab]);
 
   useEffect(() => {
     fetch("https://api.coingecko.com/api/v3/simple/price?ids=solana&vs_currencies=usd")
@@ -232,7 +264,7 @@ export default function MarketPage() {
 
   const fetchAll = useCallback(async (isActive: () => boolean = () => true) => {
     try {
-      const [obsRes, listRes, grantsRes, previewRes, earningsRes, walletRes, treasuryRes] = await Promise.all([
+      const [obsRes, listRes, grantsRes, previewRes, earningsRes, walletRes, treasuryRes, quoteRes] = await Promise.all([
         fetch(`${API}/api/observations`),
         fetch(`${API}/api/market/listings`),
         fetch(`${API}/api/market/grants`),
@@ -240,6 +272,7 @@ export default function MarketPage() {
         fetch(`${API}/api/market/earnings`),
         fetch(`${API}/api/zk/wallet`),
         fetch(`${API}/api/market/treasury`),
+        fetch(`${API}/api/market/quote`),
       ]);
       if (!isActive()) return;
 
@@ -250,6 +283,7 @@ export default function MarketPage() {
       const earningsData: Earnings = await earningsRes.json();
       const walletData = await walletRes.json();
       const treasuryData = treasuryRes.ok ? await treasuryRes.json() : { pubkey: "" };
+      const quoteData = quoteRes.ok ? await quoteRes.json() : { n_contributors: 0, total_price_lamports: 0, unit_price_lamports: FALLBACK_UNIT_PRICE };
       if (!isActive()) return;
 
       const seen = new Set<string>();
@@ -269,6 +303,13 @@ export default function MarketPage() {
       setEarnings(earningsData);
       setRecipientPubkey(walletData.pubkey || "");
       setTreasuryPubkey(treasuryData.pubkey || "");
+      setQuote(quoteData);
+      // First load: pick the tab that matches the user's likely role, without
+      // dirtying the URL. Skip if the URL already specified ?tab=.
+      if (!tabInitializedRef.current) {
+        tabInitializedRef.current = true;
+        setTabState(canonicals.length > 0 ? "sell" : "buy");
+      }
     } catch {
       // silently handle — backend may be starting
     }
@@ -302,7 +343,7 @@ export default function MarketPage() {
           fetch(`${API}/api/market/listings`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ canonical_name: canonical, price_lamports: LAMPORTS_PER_QUERY }),
+            body: JSON.stringify({ canonical_name: canonical }),
           })
         ));
         toast.success(`Listed ${toAdd.length} biomarkers`);
@@ -327,7 +368,7 @@ export default function MarketPage() {
         await fetch(`${API}/api/market/listings`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ canonical_name: canonical, price_lamports: LAMPORTS_PER_QUERY }),
+          body: JSON.stringify({ canonical_name: canonical }),
         });
         toast.success(`Listed ${formatCanonical(canonical)} on marketplace`);
       }
@@ -356,6 +397,10 @@ export default function MarketPage() {
       toast.error("No biomarkers listed for sale");
       return;
     }
+    if (quote.total_price_lamports <= 0) {
+      toast.error("No price available — wait a moment and retry");
+      return;
+    }
 
     setPurchasing(true);
     setPurchaseResult(null);
@@ -366,7 +411,7 @@ export default function MarketPage() {
         SystemProgram.transfer({
           fromPubkey: publicKey,
           toPubkey: treasury,
-          lamports: LAMPORTS_PER_QUERY,
+          lamports: quote.total_price_lamports,
         })
       );
 
@@ -406,9 +451,12 @@ export default function MarketPage() {
       {/* Page header */}
       <div className="flex items-start justify-between gap-4">
         <div>
-          <h1 className="page-title">Data Marketplace</h1>
+          <p className="page-eyebrow">Data Marketplace</p>
+          <h1 className="page-title">{tab === "sell" ? "Sell my data" : "Buy data"}</h1>
           <p className="page-subtitle">
-            Opt in biomarkers for purchase. Researchers pay {formatAmount(LAMPORTS_PER_QUERY)} to receive an anonymized snapshot.
+            {tab === "sell"
+              ? `List biomarkers from your uploads. Each contributor's per-capita share stays fixed at ${formatAmount(quote.unit_price_lamports, { precise: true })} regardless of cohort size.`
+              : `Browse anonymized aggregate snapshots. Price scales with cohort size; payment routes through treasury escrow.`}
           </p>
         </div>
         <div className="currency-toggle" role="group" aria-label="Currency display" suppressHydrationWarning>
@@ -426,6 +474,7 @@ export default function MarketPage() {
         </div>
       </div>
 
+
       {/* No-wallet warning */}
       {noWalletSaved && (
         <div className="market-warning">
@@ -437,19 +486,25 @@ export default function MarketPage() {
         </div>
       )}
 
-      {/* Section 1 — Earnings strip */}
-      {grants.length > 0 && (
+      {/* Section 1 — Earnings strip (sell only) — your share scales with biomarkers listed */}
+      {tab === "sell" && grants.length > 0 && (
         <div className="earnings-strip">
-          <span className="earnings-label">Total earned</span>
+          <span className="earnings-label">Your share</span>
           <span className="earnings-value">
             {formatAmount(earnings.total_lamports, { precise: true })}
           </span>
           <span className="earnings-sep">·</span>
-          <span className="earnings-count">{earnings.grant_count} {earnings.grant_count === 1 ? "query" : "queries"}</span>
+          <span className="earnings-count">{earnings.grant_count} {earnings.grant_count === 1 ? "buy" : "buys"}</span>
+          <span className="earnings-sep">·</span>
+          <span className="earnings-count">
+            {formatAmount(earnings.per_grant_share_lamports ?? quote.unit_price_lamports, { precise: true })} per buy
+            {earnings.n_listings ? ` (${earnings.n_listings} biomarker${earnings.n_listings === 1 ? "" : "s"} listed)` : ""}
+          </span>
         </div>
       )}
 
-      {/* Section 2 — My Listings (collapsible) */}
+      {/* Section 2 — My Listings (collapsible, sell only) */}
+      {tab === "sell" && (
       <section>
         <details className="how-details" open>
           <summary className="how-summary listings-summary">
@@ -486,7 +541,7 @@ export default function MarketPage() {
               <>
                 {listings.length > 0 && (
                   <p className="listings-price-line">
-                    Each listing priced at <strong>{formatAmount(LAMPORTS_PER_QUERY)}</strong> per query
+                    Dataset priced at <strong>{formatAmount(quote.unit_price_lamports, { precise: true })}</strong> per contributor · {quote.n_contributors.toLocaleString()} contributors · total <strong>{formatAmount(quote.total_price_lamports, { precise: true })}</strong>
                   </p>
                 )}
                 <div className="listings-grid">
@@ -514,131 +569,56 @@ export default function MarketPage() {
         </details>
       </section>
 
-      {/* Section 3 — Transaction History (collapsible) */}
-      <section>
-        <details className="how-details" open={grants.length > 0}>
-          <summary className="how-summary">
-            <span className="how-arrow">▶</span>
-            Transaction history
-            {grants.length > 0 && <span className="proofs-count">{grants.length}</span>}
-          </summary>
-          <div className="how-body">
-            {grants.length === 0 ? (
-              <p className="empty-proofs">No purchases yet.</p>
-            ) : (
-              <table className="preview-table">
-                <thead>
-                  <tr>
-                    <th className="preview-th">Date</th>
-                    <th className="preview-th">Researcher</th>
-                    <th className="preview-th">{currency}</th>
-                    <th className="preview-th">Tx</th>
-                    <th className="preview-th">Data</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {grants.map((g) => {
-                    let storedRows: PersonRow[] = [];
-                    let storedSummary: SnapshotSummary[] = [];
-                    try {
-                      const parsed = JSON.parse(g.anonymized_data);
-                      const norm = normalizeSnapshot(parsed);
-                      storedRows = norm.rows;
-                      storedSummary = norm.summary;
-                    } catch {
-                      /* malformed cell — download buttons stay hidden */
-                    }
-                    return (
-                      <tr key={g.grant_id}>
-                        <td className="preview-td">{g.created_at.slice(0, 10)}</td>
-                        <td className="preview-td">
-                          <span className="wallet-saved">{truncatePubkey(g.researcher_pubkey)}</span>
-                        </td>
-                        <td className="preview-td">
-                          {currency === "SOL"
-                            ? (g.lamports_received / LAMPORTS_PER_SOL).toFixed(4)
-                            : `$${((g.lamports_received / LAMPORTS_PER_SOL) * solPrice).toFixed(2)}`}
-                        </td>
-                        <td className="preview-td">
-                          {g.solana_tx_id ? (
-                            <a
-                              href={`https://explorer.solana.com/tx/${g.solana_tx_id}?cluster=devnet`}
-                              target="_blank"
-                              rel="noopener noreferrer"
-                              className="solana-link"
-                            >
-                              {g.solana_tx_id.slice(0, 8)}… ↗
-                            </a>
-                          ) : (
-                            <span className="wallet-none">—</span>
-                          )}
-                        </td>
-                        <td className="preview-td">
-                          {storedRows.length > 0 ? (
-                            <span className="grant-download-group">
-                              <button
-                                type="button"
-                                onClick={() => downloadSnapshot(storedRows, storedSummary, g.grant_id, "csv")}
-                                className="grant-download-btn"
-                                title="Download as CSV"
-                              >↓ CSV</button>
-                              <button
-                                type="button"
-                                onClick={() => downloadSnapshot(storedRows, storedSummary, g.grant_id, "json")}
-                                className="grant-download-btn"
-                                title="Download as JSON"
-                              >↓ JSON</button>
-                            </span>
-                          ) : (
-                            <span className="wallet-none">—</span>
-                          )}
-                        </td>
-                      </tr>
-                    );
-                  })}
-                </tbody>
-              </table>
-            )}
-          </div>
-        </details>
-      </section>
+      )}
 
-      {/* Section 4 — Researcher Panel (collapsible) */}
-      <section>
-        <details className="how-details">
-          <summary className="how-summary">
-            <span className="how-arrow">▶</span>
-            Researcher panel — buy anonymized data
-          </summary>
-          <div className="how-body space-y-4">
-            {/* Preview table */}
-            {preview.length === 0 ? (
-              <p className="empty-proofs">No biomarkers listed for sale yet.</p>
+      {/* Researcher Buy flow (buy tab only) */}
+      {tab === "buy" && (
+      <section className="space-y-4">
+          {/* Available dataset preview (collapsible to match the rest of the platform) */}
+          {preview.length === 0 ? (
+              <div className="card">
+                <p className="empty-state">
+                  No datasets are currently listed. Sellers list biomarkers under <button type="button" onClick={() => setTab("sell")} className="solana-link" suppressHydrationWarning>Sell my data</button>. Once they do, you&apos;ll see an anonymized preview here.
+                </p>
+              </div>
             ) : (
               <>
-                <p className="how-strong">Available biomarkers (anonymized preview):</p>
-                <table className="preview-table">
-                  <thead>
-                    <tr>
-                      <th className="preview-th">Biomarker</th>
-                      <th className="preview-th">Mean value</th>
-                      <th className="preview-th">Unit</th>
-                      <th className="preview-th">Readings</th>
-                      <th className="preview-th">Contributors</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {preview.map((row) => (
-                      <tr key={row.canonical_name}>
-                        <td className="preview-td">{formatCanonical(row.canonical_name)}</td>
-                        <td className="preview-td">{row.mean}</td>
-                        <td className="preview-td">{row.unit || "—"}</td>
-                        <td className="preview-td">{row.n_readings}</td>
-                        <td className="preview-td">{row.n_contributors}</td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
+                <section>
+                  <details className="how-details" open>
+                    <summary className="how-summary">
+                      <span className="how-arrow">▶</span>
+                      <span>Available biomarkers</span>
+                      <span className="proofs-count">{preview.length}</span>
+                    </summary>
+                    <div className="how-body">
+                      <p className="study-section-hint">
+                        Anonymized preview — Laplace noise applied at ε = 1.0 differential privacy.
+                      </p>
+                      <table className="preview-table">
+                        <thead>
+                          <tr>
+                            <th className="preview-th">Biomarker</th>
+                            <th className="preview-th">Mean value</th>
+                            <th className="preview-th">Unit</th>
+                            <th className="preview-th">Readings</th>
+                            <th className="preview-th">Contributors</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {preview.map((row) => (
+                            <tr key={row.canonical_name}>
+                              <td className="preview-td">{formatCanonical(row.canonical_name)}</td>
+                              <td className="preview-td">{row.mean}</td>
+                              <td className="preview-td">{row.unit || "—"}</td>
+                              <td className="preview-td">{row.n_readings}</td>
+                              <td className="preview-td">{row.n_contributors}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  </details>
+                </section>
 
                 <div className="space-y-2">
                   <div className="card-sunk flex items-center justify-between gap-3">
@@ -668,9 +648,9 @@ export default function MarketPage() {
                     )}
                   </div>
                   <p className="stat-label">
-                    Price: {formatAmount(LAMPORTS_PER_QUERY)} {currency === "SOL" && (
-                      <span className="wallet-saved">≈ ${((LAMPORTS_PER_QUERY / LAMPORTS_PER_SOL) * solPrice).toFixed(2)} USDC</span>
-                    )} · <span className="info-badge">
+                    Price: {formatAmount(quote.total_price_lamports, { precise: true })} {currency === "SOL" && (
+                      <span className="wallet-saved">≈ ${((quote.total_price_lamports / LAMPORTS_PER_SOL) * solPrice).toFixed(2)} USDC</span>
+                    )} · {quote.n_contributors.toLocaleString()} contributors × {formatAmount(quote.unit_price_lamports, { precise: true })} · <span className="info-badge">
                       <span className="info-trigger">Private ⓘ</span>
                       <span className="info-tooltip">
                         <strong>Differential privacy, ε = 1.0.</strong>{" "}
@@ -689,7 +669,7 @@ export default function MarketPage() {
                     onClick={handlePurchase}
                     disabled={purchasing || !connected || listings.length === 0 || !recipientPubkey}
                   >
-                    {purchasing ? "Processing payment…" : `Request full dataset (${formatAmount(LAMPORTS_PER_QUERY)})`}
+                    {purchasing ? "Processing payment…" : `Request full dataset (${formatAmount(quote.total_price_lamports, { precise: true })})`}
                   </button>
                 </div>
               </>
@@ -767,7 +747,7 @@ export default function MarketPage() {
                       1, ...summaryRows.map((s) => s.n_contributors),
                     );
                   const lamportsPerContributor = purchaseResult.release_lamports ?? Math.floor(
-                    (purchaseResult.lamports ?? LAMPORTS_PER_QUERY) / Math.max(totalContributors, 1)
+                    (purchaseResult.lamports ?? quote.total_price_lamports) / Math.max(totalContributors, 1)
                   );
                   const payTxUrl = grants[0]?.solana_tx_id
                     ? `https://explorer.solana.com/tx/${grants[0].solana_tx_id}?cluster=devnet`
@@ -781,9 +761,9 @@ export default function MarketPage() {
                       <p className="distribution-line">
                         Treasury escrow received{" "}
                         <strong>
-                          {((purchaseResult.lamports ?? LAMPORTS_PER_QUERY) / LAMPORTS_PER_SOL).toFixed(4)} SOL
+                          {formatAmount(purchaseResult.lamports ?? quote.total_price_lamports, { precise: true })}
                         </strong>{" "}
-                        → split across <strong>{totalContributors.toLocaleString()}</strong> contributors at <strong>{lamportsPerContributor.toLocaleString()} lamports </strong> each. Data owner&apos;s share released to their wallet; remaining shares allocated against the contributor pool.
+                        → split across <strong>{totalContributors.toLocaleString()}</strong> contributors at <strong>{formatAmount(lamportsPerContributor, { precise: true })}</strong> each. Data owner&apos;s share released to their wallet; remaining shares allocated against the contributor pool.
                       </p>
                       <div className="distribution-meta" style={{ display: "flex", flexDirection: "column", gap: "3px" }}>
                         {payTxUrl && (
@@ -812,9 +792,93 @@ export default function MarketPage() {
                 {purchaseResult.error}
               </div>
             )}
+      </section>
+      )}
+
+      {/* Buyer's purchase history (buy tab only) — re-download datasets, see past purchases */}
+      {tab === "buy" && (
+      <section>
+        <details className="how-details" open={grants.length > 0}>
+          <summary className="how-summary">
+            <span className="how-arrow">▶</span>
+            Your purchases
+            {grants.length > 0 && <span className="proofs-count">{grants.length}</span>}
+          </summary>
+          <div className="how-body">
+            {grants.length === 0 ? (
+              <p className="empty-proofs">No purchases yet. Buy the dataset above to start your history.</p>
+            ) : (
+              <table className="preview-table">
+                <thead>
+                  <tr>
+                    <th className="preview-th">Date</th>
+                    <th className="preview-th">Price</th>
+                    <th className="preview-th">Tx</th>
+                    <th className="preview-th">Dataset</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {grants.map((g) => {
+                    let storedRows: PersonRow[] = [];
+                    let storedSummary: SnapshotSummary[] = [];
+                    try {
+                      const parsed = JSON.parse(g.anonymized_data);
+                      const norm = normalizeSnapshot(parsed);
+                      storedRows = norm.rows;
+                      storedSummary = norm.summary;
+                    } catch {
+                      /* malformed cell — download buttons stay hidden */
+                    }
+                    return (
+                      <tr key={g.grant_id}>
+                        <td className="preview-td">{g.created_at.slice(0, 10)}</td>
+                        <td className="preview-td">
+                          {formatAmount(g.lamports_received, { precise: true })}
+                        </td>
+                        <td className="preview-td">
+                          {g.solana_tx_id ? (
+                            <a
+                              href={`https://explorer.solana.com/tx/${g.solana_tx_id}?cluster=devnet`}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className="solana-link"
+                            >
+                              {g.solana_tx_id.slice(0, 8)}… ↗
+                            </a>
+                          ) : (
+                            <span className="wallet-none">—</span>
+                          )}
+                        </td>
+                        <td className="preview-td">
+                          {storedRows.length > 0 ? (
+                            <span className="grant-download-group">
+                              <button
+                                type="button"
+                                onClick={() => downloadSnapshot(storedRows, storedSummary, g.grant_id, "csv")}
+                                className="grant-download-btn"
+                                title="Download as CSV"
+                              >↓ CSV</button>
+                              <button
+                                type="button"
+                                onClick={() => downloadSnapshot(storedRows, storedSummary, g.grant_id, "json")}
+                                className="grant-download-btn"
+                                title="Download as JSON"
+                              >↓ JSON</button>
+                            </span>
+                          ) : (
+                            <span className="wallet-none">—</span>
+                          )}
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            )}
           </div>
         </details>
       </section>
+      )}
 
       {/* How it works */}
       <details className="how-details">
@@ -823,7 +887,7 @@ export default function MarketPage() {
         </summary>
         <div className="how-body space-y-2">
           <p>
-            <strong className="how-strong">Step 1 — List.</strong> Toggle biomarkers you want to sell. Each listing sets a price of 0.001 SOL per query.
+            <strong className="how-strong">Step 1 — List.</strong> Toggle biomarkers you want to sell. The dataset is priced at <strong>0.001 SOL per contributor</strong>, so your per-capita share stays constant as the cohort grows.
           </p>
           <p>
             <strong className="how-strong">Step 2 — Pay.</strong> A researcher connects their Phantom wallet and sends devnet SOL to your wallet address via a standard transfer.

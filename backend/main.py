@@ -30,7 +30,7 @@ from ingest import extract_pdf_text, parse_lab_observations, parse_wearable_csv
 from ingest_apple_health import parse_apple_health_zip
 from market import get_anonymized_snapshot, get_snapshot_summary, anonymized_preview
 
-app = FastAPI(title="ZKHealth Demo")
+app = FastAPI(title="ZKHealth")
 
 app.add_middleware(
     CORSMiddleware,
@@ -139,8 +139,9 @@ class ChatRequest(BaseModel):
 
 @app.post("/api/chat")
 async def chat(body: ChatRequest):
-    """Send a message to the AI with all uploaded health data as context."""
+    """Send a message to the LLM with all uploaded health data as context."""
     from llm import chat as llm_chat
+
     context = database.get_all_content_tier2()
     try:
         reply = await asyncio.to_thread(llm_chat, body.message, context)
@@ -598,9 +599,29 @@ def save_wallet(body: WalletBody):
 _PAYMENT_VERIFY = Path(__file__).parent / "chain" / "payment_verify.cjs"
 
 
+# Per-contributor pricing: the total a researcher pays scales with how many
+# contributors are in the snapshot, so each contributor's per-capita share
+# stays constant regardless of cohort size. This is how production data
+# marketplaces (AWS Data Exchange, Datacoup) price datasets and keeps the
+# economics fair as the platform grows.
+_PRICE_PER_CONTRIBUTOR_LAMPORTS = 1_000_000  # 0.001 SOL per contributor
+
+
+def _quote_for(listings: list[dict]) -> tuple[int, int]:
+    """Return (n_contributors, total_price_lamports) for the current listing
+    set. n_contributors is the max contributor count across listed biomarkers,
+    which equals the row count of the released snapshot."""
+    if not listings:
+        return 0, 0
+    all_obs = database.get_observations()
+    listed_canonicals = {l["canonical_name"] for l in listings}
+    summary = get_snapshot_summary(all_obs, listed_canonicals)
+    n = max((row["n_contributors"] for row in summary), default=1)
+    return n, n * _PRICE_PER_CONTRIBUTOR_LAMPORTS
+
+
 class ListingBody(BaseModel):
     canonical_name: str
-    price_lamports: int = 1_000_000
 
 
 class AccessBody(BaseModel):
@@ -617,9 +638,7 @@ def market_list_listings():
 def market_add_listing(body: ListingBody):
     if not body.canonical_name.strip():
         raise HTTPException(status_code=422, detail="canonical_name is required")
-    if body.price_lamports <= 0:
-        raise HTTPException(status_code=422, detail="price_lamports must be positive")
-    listing_id = database.add_listing(body.canonical_name.strip(), body.price_lamports)
+    listing_id = database.add_listing(body.canonical_name.strip())
     return {"listing_id": listing_id, "canonical_name": body.canonical_name.strip()}
 
 
@@ -635,6 +654,19 @@ def market_preview():
     listings = database.get_listings()
     listed_canonicals = {l["canonical_name"] for l in listings}
     return anonymized_preview(all_obs, listed_canonicals)
+
+
+@app.get("/api/market/quote")
+def market_quote():
+    """Return the current researcher price for the full snapshot."""
+    listings = database.get_listings()
+    n, total = _quote_for(listings)
+    return {
+        "n_contributors": n,
+        "n_listings": len(listings),
+        "unit_price_lamports": _PRICE_PER_CONTRIBUTOR_LAMPORTS,
+        "total_price_lamports": total,
+    }
 
 
 @app.get("/api/market/treasury")
@@ -664,13 +696,15 @@ async def market_access(body: AccessBody):
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Treasury unavailable: {exc}") from exc
 
-    min_price = min(l["price_lamports"] for l in listings)
+    # Price the full snapshot at unit × n_contributors, so each contributor's
+    # per-capita share stays fixed regardless of cohort size.
+    _expected_n, expected_price = _quote_for(listings)
 
     # 1. Verify the researcher's payment landed in the TREASURY, not the data owner's wallet.
     try:
         proc = await asyncio.to_thread(
             subprocess.run,
-            ["node", str(_PAYMENT_VERIFY), body.tx_signature, treasury_pubkey, str(min_price)],
+            ["node", str(_PAYMENT_VERIFY), body.tx_signature, treasury_pubkey, str(expected_price)],
             capture_output=True, text=True, timeout=15,
         )
         verify_result = json.loads(proc.stdout)
@@ -682,17 +716,19 @@ async def market_access(body: AccessBody):
     if not verify_result.get("verified"):
         return {"verified": False, "error": verify_result.get("error", "Payment not verified")}
 
-    lamports = verify_result.get("lamports", min_price)
+    lamports = verify_result.get("lamports", expected_price)
     sender = verify_result.get("sender", body.researcher_pubkey)
     researcher_pubkey = body.researcher_pubkey or sender
 
-    # 2. Compute the contributor split.
+    # 2. Compute the contributor split. The data owner's share scales with the
+    # number of biomarkers they've actually listed — a richer contribution
+    # earns a proportionally larger payout per buy.
     all_obs = database.get_observations()
     listed_canonicals = {l["canonical_name"] for l in listings}
     snapshot = get_anonymized_snapshot(all_obs, listed_canonicals)        # per-row
     summary = get_snapshot_summary(all_obs, listed_canonicals)            # per-biomarker counts
     total_contributors = max((row["n_contributors"] for row in summary), default=1)
-    data_owner_share = lamports // total_contributors
+    data_owner_share = _PRICE_PER_CONTRIBUTOR_LAMPORTS * len(listings)
 
     # 3. Release the data owner's share from treasury via on-chain transfer.
     # The remaining (N-1)/N is allocated against the contributor pool and
@@ -732,113 +768,24 @@ def market_list_grants():
 
 @app.get("/api/market/earnings")
 def market_earnings():
+    """Return the data owner's share, not the gross purchase amount.
+
+    Each buy pays the data owner `_PRICE_PER_CONTRIBUTOR_LAMPORTS × n_listings`,
+    so listing more biomarkers (richer contribution) earns a proportionally
+    larger share per buy. Uses current listing count; in production we'd snapshot
+    n_listings per grant."""
     grants = database.get_grants()
-    total_lamports = sum(g["lamports_received"] for g in grants)
-    return {"total_lamports": total_lamports, "grant_count": len(grants)}
-
-
-# ── Demo seeding ─────────────────────────────────────────────────────────────
-
-
-_SAMPLE_WEARABLES = Path(__file__).parent.parent / "sample_data" / "sample_wearables.csv"
-
-# Three time-points per biomarker so the dashboard trend chart has data to plot.
-# Some values trend in/out of normal range to make the flags + chart visible.
-# Format: (canonical_name, [(date, value)], unit)
-_DEMO_LAB_PANEL: list[tuple[str, list[tuple[str, float]], str]] = [
-    ("hemoglobin",     [("2025-11-15", 13.8), ("2026-02-15", 14.0), ("2026-05-08", 14.2)], "g/dL"),
-    ("hematocrit",     [("2025-11-15", 41.0), ("2026-02-15", 41.8), ("2026-05-08", 42.5)], "%"),
-    ("rbc",            [("2025-11-15", 4.7),  ("2026-02-15", 4.75), ("2026-05-08", 4.8)],  "M/uL"),
-    ("wbc",            [("2025-11-15", 7.1),  ("2026-02-15", 6.9),  ("2026-05-08", 6.7)],  "K/uL"),
-    ("platelets",      [("2025-11-15", 232),  ("2026-02-15", 240),  ("2026-05-08", 245)],  "K/uL"),
-    ("glucose",        [("2025-11-15", 98),   ("2026-02-15", 95),   ("2026-05-08", 92)],   "mg/dL"),
-    ("hba1c",          [("2025-11-15", 5.6),  ("2026-02-15", 5.5),  ("2026-05-08", 5.4)],  "%"),
-    ("sodium",         [("2025-11-15", 139),  ("2026-02-15", 140),  ("2026-05-08", 140)],  "mmol/L"),
-    ("potassium",      [("2025-11-15", 4.1),  ("2026-02-15", 4.2),  ("2026-05-08", 4.2)],  "mmol/L"),
-    ("creatinine",     [("2025-11-15", 1.05), ("2026-02-15", 1.02), ("2026-05-08", 1.0)],  "mg/dL"),
-    # Cholesterol trending UP — out of range now
-    ("cholesterol",    [("2025-11-15", 198),  ("2026-02-15", 207),  ("2026-05-08", 215)],  "mg/dL"),
-    ("ldl",            [("2025-11-15", 128),  ("2026-02-15", 135),  ("2026-05-08", 142)],  "mg/dL"),
-    ("hdl",            [("2025-11-15", 52),   ("2026-02-15", 50),   ("2026-05-08", 48)],   "mg/dL"),
-    ("triglycerides",  [("2025-11-15", 110),  ("2026-02-15", 118),  ("2026-05-08", 124)],  "mg/dL"),
-    ("tsh",            [("2025-11-15", 2.3),  ("2026-02-15", 2.2),  ("2026-05-08", 2.1)],  "uIU/mL"),
-    # Ferritin trending DOWN
-    ("ferritin",       [("2025-11-15", 56),   ("2026-02-15", 47),   ("2026-05-08", 38)],   "ng/mL"),
-    # Vitamin D out of range (low) — improving with supplementation
-    ("vitamin_d",      [("2025-11-15", 18),   ("2026-02-15", 21),   ("2026-05-08", 24)],   "ng/mL"),
-    ("vitamin_b12",    [("2025-11-15", 460),  ("2026-02-15", 470),  ("2026-05-08", 480)],  "pg/mL"),
-    ("alt",            [("2025-11-15", 30),   ("2026-02-15", 29),   ("2026-05-08", 28)],   "U/L"),
-    ("ast",            [("2025-11-15", 24),   ("2026-02-15", 23),   ("2026-05-08", 22)],   "U/L"),
-    ("crp",            [("2025-11-15", 0.8),  ("2026-02-15", 0.7),  ("2026-05-08", 0.6)],  "mg/L"),
-    ("testosterone",   [("2025-11-15", 510),  ("2026-02-15", 525),  ("2026-05-08", 540)],  "ng/dL"),
-]
-
-
-@app.post("/api/demo/load")
-async def demo_load():
-    """Seed the database with a sample lab panel + wearable CSV. Idempotent — skips if demo data already loaded."""
-    from zk.attestation import attest_observations_batch
-
-    existing = database.get_documents()
-    already = any(d["filename"].startswith("demo_") for d in existing)
-    if already:
-        return {"already_loaded": True, "documents": len(existing)}
-
-    # Build the full list of (doc_id, canonical, value, unit, date) tuples first,
-    # save observations, then batch-attest them all in one Node call.
-    pending: list[dict] = []
-
-    # Lab panel — one document per visit date so the dashboard groups by visit
-    visit_dates = sorted({d for _, readings, _ in _DEMO_LAB_PANEL for d, _ in readings})
-    visit_docs = {
-        v_date: database.save_document(
-            f"demo_bloodwork_{v_date}.pdf", "lab_pdf",
-            f"Comprehensive metabolic + lipid + vitamin panel — collected {v_date} (demo).",
-        )
-        for v_date in visit_dates
-    }
-    lab_count = 0
-    for canonical, readings, unit in _DEMO_LAB_PANEL:
-        for d, value in readings:
-            obs_id = database.save_observation(visit_docs[d], canonical, value, unit, d)
-            pending.append({"obs_id": obs_id, "canonical_name": canonical, "value": value, "date_effective": d})
-            lab_count += 1
-
-    # Wearable CSV
-    wearable_count = 0
-    if _SAMPLE_WEARABLES.exists():
-        from ingest import parse_wearable_csv
-        with open(_SAMPLE_WEARABLES, "rb") as f:
-            file_bytes = f.read()
-        summary, rows = parse_wearable_csv(file_bytes)
-        wearable_doc_id = database.save_document("demo_wearables.csv", "wearable_csv", summary)
-        units = {
-            "steps": "steps", "heart_rate_avg": "bpm", "heart_rate_resting": "bpm",
-            "sleep_hours": "h", "hrv": "ms", "spo2": "%", "calories_burned": "kcal",
-            "active_minutes": "min",
-        }
-        for row in rows:
-            d = row.get("date", "")
-            for col, unit in units.items():
-                if col not in row:
-                    continue
-                try:
-                    val = float(row[col])
-                except (ValueError, TypeError):
-                    continue
-                obs_id = database.save_observation(wearable_doc_id, col, val, unit, d)
-                pending.append({"obs_id": obs_id, "canonical_name": col, "value": val, "date_effective": d})
-                wearable_count += 1
-
-    # ONE Node subprocess for all hashes (~1.5s instead of ~30s)
-    payloads = await asyncio.to_thread(attest_observations_batch, pending)
-    for p in payloads:
-        database.save_attestation(p["obs_id"], p)
-
+    grant_count = len(grants)
+    n_listings = len(database.get_listings())
+    per_buy_share = _PRICE_PER_CONTRIBUTOR_LAMPORTS * max(n_listings, 1)
+    your_share = per_buy_share * grant_count
+    gross = sum(g["lamports_received"] for g in grants)
     return {
-        "already_loaded": False,
-        "lab_observations": lab_count,
-        "wearable_observations": wearable_count,
+        "total_lamports": your_share,
+        "grant_count": grant_count,
+        "gross_lamports": gross,
+        "per_grant_share_lamports": per_buy_share,
+        "n_listings": n_listings,
     }
 
 

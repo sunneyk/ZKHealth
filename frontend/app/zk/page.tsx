@@ -1,8 +1,183 @@
 "use client";
 import { useState, useEffect } from "react";
 import { toast } from "sonner";
+import { Modal } from "../components/Modal";
+import { biomarkerLabel } from "../lib/biomarkerLabel";
 
 const API = "http://127.0.0.1:8000";
+
+// ── Research studies catalog ──────────────────────────────────────────────────
+type StudyEligibility =
+  | { biomarker: string; mode: "below" | "above"; threshold: number; unit: string; description: string }
+  | { biomarker: string; mode: "range"; threshold_low: number; threshold_high: number; unit: string; description: string };
+
+type Study = {
+  id: string;
+  title: string;
+  institution: string;
+  description: string;
+  eligibility: StudyEligibility;
+  compensation: string;
+  duration: string;
+  enrollment: "Recruiting" | "Closing soon" | "Open";
+};
+
+const STUDIES: Study[] = [
+  {
+    id: "stillwater-iron-recovery",
+    title: "Iron Deficiency Recovery Trial",
+    institution: "Stillwater Iron Studies Group",
+    description: "Eight-week trial comparing alternate-day vs. daily oral iron supplementation in adults with low ferritin. Bi-weekly check-ins with the research team plus a final repeat panel.",
+    eligibility: { biomarker: "ferritin", mode: "below", threshold: 30, unit: "ng/mL",
+      description: "Ferritin below 30 ng/mL" },
+    compensation: "$200 + free supplements",
+    duration: "8 weeks",
+    enrollment: "Recruiting",
+  },
+  {
+    id: "fairhaven-vitamin-d",
+    title: "Vitamin D and Subjective Energy",
+    institution: "Fairhaven Nutrition Sciences",
+    description: "Crossover study on whether 2,000 IU/day vitamin D3 improves self-reported energy in adults with insufficient levels. Daily symptom journal via the study app.",
+    eligibility: { biomarker: "vitamin_d", mode: "below", threshold: 30, unit: "ng/mL",
+      description: "Vitamin D below 30 ng/mL" },
+    compensation: "$150 + supplements",
+    duration: "12 weeks",
+    enrollment: "Recruiting",
+  },
+  {
+    id: "helix-hrv-recovery",
+    title: "HRV-Based Recovery Cohort",
+    institution: "Helix Longevity Labs",
+    description: "Observational study of adults with sustained low HRV (<40 ms) to characterize recovery patterns and identify reversible drivers. Wearable data shared weekly.",
+    eligibility: { biomarker: "hrv", mode: "below", threshold: 40, unit: "ms",
+      description: "Recent HRV below 40 ms" },
+    compensation: "$75 + wearable credit",
+    duration: "6 weeks",
+    enrollment: "Recruiting",
+  },
+  {
+    id: "concord-glucose-baseline",
+    title: "Healthy Glucose Baseline Cohort",
+    institution: "Concord Health Research",
+    description: "Prospective cohort enrolling adults with normal HbA1c to characterize day-to-day glucose patterns via CGM. Free continuous glucose monitor for the duration.",
+    eligibility: { biomarker: "hba1c", mode: "below", threshold: 5.7, unit: "%",
+      description: "HbA1c below 5.7%" },
+    compensation: "$300 + free CGM",
+    duration: "4 weeks",
+    enrollment: "Recruiting",
+  },
+  {
+    id: "pioneer-borderline-anemia",
+    title: "Borderline Anemia Outreach",
+    institution: "Pioneer Hematology Network",
+    description: "Screening + counseling program for women with hemoglobin in the low-normal range. One nutrition consult, no investigational treatment.",
+    eligibility: { biomarker: "hemoglobin", mode: "below", threshold: 13.0, unit: "g/dL",
+      description: "Hemoglobin below 13.0 g/dL" },
+    compensation: "$50 gift card",
+    duration: "Single visit",
+    enrollment: "Open",
+  },
+  {
+    id: "solstice-active-heart",
+    title: "Active Adults Heart Study",
+    institution: "Solstice Cardio Research",
+    description: "Long-term passive observation cohort tracking resting heart rate and rhythm in adults with healthy cardiovascular baselines. Wearable required (provided).",
+    eligibility: { biomarker: "heart_rate_resting", mode: "below", threshold: 75, unit: "bpm",
+      description: "Resting HR below 75 bpm" },
+    compensation: "Free wearable device",
+    duration: "12 months",
+    enrollment: "Open",
+  },
+  {
+    id: "lighthouse-lipid-cohort",
+    title: "Heart-Healthy Lipid Cohort",
+    institution: "Lighthouse Cardiometabolic Lab",
+    description: "Reference cohort of adults with total cholesterol below 200 mg/dL — used as the control arm in upcoming statin-deprescribing trials. One annual lipid panel.",
+    eligibility: { biomarker: "cholesterol", mode: "below", threshold: 200, unit: "mg/dL",
+      description: "Total cholesterol below 200 mg/dL" },
+    compensation: "$100/year",
+    duration: "5 years",
+    enrollment: "Open",
+  },
+  {
+    id: "cedarhill-thyroid-baseline",
+    title: "Optimal Thyroid Function Study",
+    institution: "Cedar Hill Endocrine Research",
+    description: "Reference baseline cohort for adults with TSH in the optimal range (0.5-3.0). Used for future biomarker-correlation studies.",
+    eligibility: { biomarker: "tsh", mode: "range", threshold_low: 0.5, threshold_high: 3.0, unit: "uIU/mL",
+      description: "TSH between 0.5 and 3.0 uIU/mL" },
+    compensation: "$80",
+    duration: "Single visit",
+    enrollment: "Open",
+  },
+  {
+    id: "atlas-tibc-study",
+    title: "Iron Transport Capacity Study",
+    institution: "Atlas Biomarker Foundation",
+    description: "Mechanistic study of iron transport in adults with elevated TIBC (a sign the body is upregulating iron uptake). Includes a tracer study with stable-isotope iron.",
+    eligibility: { biomarker: "tibc", mode: "above", threshold: 350, unit: "ug/dL",
+      description: "TIBC above 350 ug/dL" },
+    compensation: "$250",
+    duration: "3 visits over 4 weeks",
+    enrollment: "Recruiting",
+  },
+  {
+    id: "civic-diabetes-risk",
+    title: "Type 2 Diabetes Risk Screening",
+    institution: "Civic Health Research Institute",
+    description: "Recruiting adults with elevated HbA1c for an early-intervention lifestyle program — diabetes prevention curriculum, group sessions, coach check-ins.",
+    eligibility: { biomarker: "hba1c", mode: "above", threshold: 6.5, unit: "%",
+      description: "HbA1c above 6.5%" },
+    compensation: "Free 16-week prevention program",
+    duration: "16 weeks",
+    enrollment: "Recruiting",
+  },
+  {
+    id: "beacon-high-hdl",
+    title: "High-HDL Longitudinal Cohort",
+    institution: "Beacon Cardiometabolic Group",
+    description: "Long-term cohort of adults with HDL above 60 mg/dL — investigating cardiovascular outcomes in this naturally protected group.",
+    eligibility: { biomarker: "hdl", mode: "above", threshold: 60, unit: "mg/dL",
+      description: "HDL above 60 mg/dL" },
+    compensation: "$120/year",
+    duration: "10 years (annual visit)",
+    enrollment: "Open",
+  },
+  {
+    id: "northbridge-long-sleep",
+    title: "Long Sleep Pattern Study",
+    institution: "Northbridge Sleep Institute",
+    description: "Observational cohort for adults averaging more than 8 hours of sleep per night. Examining metabolic and cognitive effects of long-sleep phenotypes.",
+    eligibility: { biomarker: "sleep_hours", mode: "above", threshold: 8.0, unit: "h",
+      description: "Average sleep above 8 hours" },
+    compensation: "$60",
+    duration: "4 weeks",
+    enrollment: "Open",
+  },
+  {
+    id: "meridian-endurance",
+    title: "Endurance Athlete Baseline",
+    institution: "Meridian Sports Science Lab",
+    description: "Reference population for elite endurance athletes — resting HR below 55 bpm. Used to calibrate training-load algorithms.",
+    eligibility: { biomarker: "heart_rate_resting", mode: "below", threshold: 55, unit: "bpm",
+      description: "Resting HR below 55 bpm" },
+    compensation: "$200 + VO2 max test",
+    duration: "Single visit",
+    enrollment: "Closing soon",
+  },
+  {
+    id: "westgate-hydration",
+    title: "Hydration Marker Validation",
+    institution: "Westgate Renal Group",
+    description: "Methods study correlating BUN with hydration biomarkers (urine specific gravity, copeptin). One blood draw plus a 7-day fluid log.",
+    eligibility: { biomarker: "bun", mode: "below", threshold: 20, unit: "mg/dL",
+      description: "BUN below 20 mg/dL" },
+    compensation: "$90",
+    duration: "1 week",
+    enrollment: "Open",
+  },
+];
 
 type Observation = { obs_id: string; canonical_name: string; value: number; unit: string; date_effective: string };
 type Proof = { proof_id: string; biomarker_name: string; claim_type: string; threshold_display: string; passes: number; solana_tx_id: string; created_at: string };
@@ -28,12 +203,21 @@ function ProofRow({ proof }: { proof: Proof }) {
     setDownloading(true);
     try {
       const res = await fetch(`${API}/api/zk/export/${proof.proof_id}`);
+      if (!res.ok) throw new Error(await res.text());
       const blob = await res.blob();
       const url = URL.createObjectURL(blob);
+      // 1) Trigger the download
       const a = document.createElement("a");
-      a.href = url; a.download = `zkhealth_proof_${proof.proof_id.slice(0, 8)}.html`;
-      document.body.appendChild(a); a.click(); a.remove();
-      URL.revokeObjectURL(url);
+      a.href = url;
+      a.download = `zkhealth_proof_${proof.proof_id.slice(0, 8)}.html`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      // 2) Open the same blob in a new tab so the verifier can be reviewed instantly
+      window.open(url, "_blank", "noopener,noreferrer");
+      // Revoke after a delay so the new tab has time to load the resource
+      setTimeout(() => URL.revokeObjectURL(url), 60_000);
+      toast.success("Verifier downloaded — preview opened in a new tab");
     } catch { toast.error("Export failed"); }
     finally { setDownloading(false); }
   }
@@ -105,6 +289,29 @@ function ProofRow({ proof }: { proof: Proof }) {
   );
 }
 
+function StudyCard({ study, qualifies, onOpen }: {
+  study: Study;
+  qualifies: boolean | null;
+  onOpen: () => void;
+}) {
+  const status = qualifies === true ? "qualifies" : qualifies === false ? "no-match" : "unknown";
+  return (
+    <button type="button" onClick={onOpen} className={`study-card study-card-${status}`}>
+      <div className="study-card-top">
+        <span className="study-card-institution">{study.institution}</span>
+        {qualifies === true && <span className="study-card-pill">✓ qualifies</span>}
+        {qualifies === false && <span className="study-card-pill study-card-pill-muted">no match</span>}
+      </div>
+      <h3 className="study-card-title">{study.title}</h3>
+      <p className="study-card-criteria">{study.eligibility.description}</p>
+      <div className="study-card-footer">
+        <span className="study-card-comp">{study.compensation}</span>
+        <span className="study-card-meta">{study.duration}</span>
+      </div>
+    </button>
+  );
+}
+
 export default function ZkPage() {
   const [observations, setObservations] = useState<Observation[]>([]);
   const [proofs, setProofs] = useState<Proof[]>([]);
@@ -117,6 +324,8 @@ export default function ZkPage() {
   const [anchorOnChain, setAnchorOnChain] = useState(true);
   const [proving, setProving] = useState(false);
   const [showAllSuggestions, setShowAllSuggestions] = useState(false);
+  const [openStudy, setOpenStudy] = useState<Study | null>(null);
+  const [submittingStudy, setSubmittingStudy] = useState(false);
 
   useEffect(() => {
     fetch(`${API}/api/observations`).then(r => r.json()).then(setObservations).catch(() => {});
@@ -185,6 +394,63 @@ export default function ZkPage() {
     setThreshold(String(s.threshold));
   }
 
+  // Find the user's most-recent observation matching the study's biomarker.
+  // Observations are ordered by date descending in the API response.
+  function userMatchForStudy(study: Study): { obs: Observation | undefined; qualifies: boolean | null } {
+    const obs = observations.find(o => o.canonical_name === study.eligibility.biomarker);
+    if (!obs) return { obs: undefined, qualifies: null };
+    const v = obs.value;
+    let qualifies = false;
+    if (study.eligibility.mode === "below") qualifies = v < study.eligibility.threshold;
+    else if (study.eligibility.mode === "above") qualifies = v > study.eligibility.threshold;
+    else qualifies = v >= study.eligibility.threshold_low && v < study.eligibility.threshold_high;
+    return { obs, qualifies };
+  }
+
+  async function handleStudySubmit(study: Study) {
+    const { obs, qualifies } = userMatchForStudy(study);
+    if (!obs || !qualifies) return;
+    setSubmittingStudy(true);
+    try {
+      const proofBiomarkerName = `${biomarkerLabel(study.eligibility.biomarker)} → ${study.institution}`;
+      let res: Response;
+      if (study.eligibility.mode === "range") {
+        res = await fetch(`${API}/api/zk/prove_range`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            obs_id: obs.obs_id,
+            threshold_low: study.eligibility.threshold_low,
+            threshold_high: study.eligibility.threshold_high,
+            biomarker_name: proofBiomarkerName,
+            anchor_on_chain: true,
+          }),
+        });
+      } else {
+        res = await fetch(`${API}/api/zk/prove`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            obs_id: obs.obs_id,
+            threshold: study.eligibility.threshold,
+            direction: study.eligibility.mode,
+            biomarker_name: proofBiomarkerName,
+            anchor_on_chain: true,
+          }),
+        });
+      }
+      if (!res.ok) throw new Error((await res.json()).detail);
+      toast.success(`Eligibility proof sent to ${study.institution}`);
+      const updated = await fetch(`${API}/api/zk/list`).then(r => r.json());
+      setProofs(updated);
+      setOpenStudy(null);
+    } catch (err: unknown) {
+      toast.error(`Failed: ${err instanceof Error ? err.message : String(err)}`);
+    } finally {
+      setSubmittingStudy(false);
+    }
+  }
+
   async function handleProve(e: React.FormEvent) {
     e.preventDefault();
     if (!selectedObs || !biomarkerName) return;
@@ -226,12 +492,46 @@ export default function ZkPage() {
     } finally { setProving(false); }
   }
 
+  // Pre-rank studies: ones the user qualifies for first, then unknown, then no-match.
+  const rankedStudies = STUDIES.map((s) => ({ study: s, ...userMatchForStudy(s) }))
+    .sort((a, b) => {
+      const order = (q: boolean | null) => (q === true ? 0 : q === null ? 1 : 2);
+      return order(a.qualifies) - order(b.qualifies);
+    });
+
   return (
     <div className="space-y-8 cascade">
       <div>
         <h1 className="page-title">ZK Proofs</h1>
         <p className="page-subtitle">Prove a health claim without revealing your actual value.</p>
       </div>
+
+      <section>
+        <details className="how-details" open>
+          <summary className="how-summary">
+            <span className="how-arrow">▶</span>
+            <span>Research studies</span>
+            <span className="proofs-count">
+              {rankedStudies.filter(r => r.qualifies === true).length}/{STUDIES.length}
+            </span>
+          </summary>
+          <div className="how-body study-section-body">
+            <p className="study-section-hint">
+              Apply via ZK proof — your value stays private. Scroll to browse all {STUDIES.length} studies; ones that match your data are first.
+            </p>
+            <div className="study-scroll">
+              {rankedStudies.map(({ study, qualifies }) => (
+                <StudyCard
+                  key={study.id}
+                  study={study}
+                  qualifies={qualifies}
+                  onOpen={() => setOpenStudy(study)}
+                />
+              ))}
+            </div>
+          </div>
+        </details>
+      </section>
 
       <section className="space-y-2">
         <p className="section-label">Generate proof</p>
@@ -375,6 +675,83 @@ export default function ZkPage() {
           <p><strong className="how-strong">Export.</strong> Download a self-contained HTML file — no install required for your provider to verify.</p>
         </div>
       </details>
+
+      {/* Study apply modal */}
+      {(() => {
+        if (!openStudy) {
+          return (
+            <Modal open={false} onClose={() => setOpenStudy(null)} title="">
+              <></>
+            </Modal>
+          );
+        }
+        const { obs, qualifies } = userMatchForStudy(openStudy);
+        const elig = openStudy.eligibility;
+        const claimText = elig.mode === "range"
+          ? `${biomarkerLabel(elig.biomarker)} between ${elig.threshold_low} and ${elig.threshold_high} ${elig.unit}`
+          : `${biomarkerLabel(elig.biomarker)} ${elig.mode} ${elig.threshold} ${elig.unit}`;
+        return (
+          <Modal
+            open
+            onClose={() => setOpenStudy(null)}
+            title={openStudy.title}
+            subtitle={openStudy.institution}
+            footer={
+              <>
+                <button type="button" onClick={() => setOpenStudy(null)} className="btn-ghost">Cancel</button>
+                <button
+                  type="button"
+                  onClick={() => handleStudySubmit(openStudy)}
+                  disabled={submittingStudy || !obs || !qualifies}
+                  className="btn-connect"
+                >
+                  {submittingStudy
+                    ? "Sending proof…"
+                    : !obs
+                    ? "No matching data"
+                    : !qualifies
+                    ? "Doesn't match your data"
+                    : `Confirm & send proof to ${openStudy.institution}`}
+                </button>
+              </>
+            }
+          >
+            <div className="study-modal-body">
+              <p className="study-modal-description">{openStudy.description}</p>
+
+              <div className="study-modal-grid">
+                <div className="study-modal-cell">
+                  <span className="study-modal-label">Compensation</span>
+                  <span className="study-modal-value">{openStudy.compensation}</span>
+                </div>
+                <div className="study-modal-cell">
+                  <span className="study-modal-label">Duration</span>
+                  <span className="study-modal-value">{openStudy.duration}</span>
+                </div>
+                <div className="study-modal-cell">
+                  <span className="study-modal-label">Status</span>
+                  <span className="study-modal-value">{openStudy.enrollment}</span>
+                </div>
+              </div>
+
+              <div className="study-modal-section">
+                <p className="study-modal-section-label">Eligibility</p>
+                <p className="study-modal-eligibility">{elig.description}</p>
+              </div>
+
+              <div className={`study-modal-match study-modal-match-${qualifies === true ? "pass" : qualifies === false ? "fail" : "missing"}`}>
+                {!obs ? (
+                  <span>You don&apos;t have data for <strong>{biomarkerLabel(elig.biomarker)}</strong> yet — upload more data on the Chat page first.</span>
+                ) : qualifies ? (
+                  <span>✓ Your <strong>{biomarkerLabel(elig.biomarker)}</strong> data matches. Sending will generate a ZK proof of <strong>{claimText}</strong> — your actual value is never revealed.</span>
+                ) : (
+                  <span>✗ Your most recent <strong>{biomarkerLabel(elig.biomarker)}</strong> doesn&apos;t fit this study&apos;s criteria. (We can still send the proof; the institution will see it does not pass.)</span>
+                )}
+              </div>
+            </div>
+          </Modal>
+        );
+      })()}
     </div>
   );
 }

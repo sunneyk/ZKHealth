@@ -75,45 +75,75 @@ export default function ChatPage() {
   // Refresh after any upload finishes (even if it kicked off from another tab/page)
   useEffect(() => onFinish(refreshWelcome), [onFinish, refreshWelcome]);
 
-  async function processFile(file: File) {
-    const allowed = [".pdf", ".csv", ".zip"];
-    const lower = file.name.toLowerCase();
-    if (!allowed.some(ext => lower.endsWith(ext))) {
-      toast.error("Unsupported file — drop a PDF, CSV, or Apple Health ZIP");
-      return;
-    }
+  async function processFiles(rawFiles: FileList | File[]) {
+    const files = Array.from(rawFiles);
+    if (files.length === 0) return;
     if (uploading) {
       toast.warning("Already uploading — wait for the current upload to finish");
       return;
     }
-    startUpload(file.name);
+    const allowed = [".pdf", ".csv", ".zip"];
+    const valid: File[] = [];
+    const invalid: string[] = [];
+    for (const f of files) {
+      const lower = f.name.toLowerCase();
+      if (allowed.some(ext => lower.endsWith(ext))) valid.push(f);
+      else invalid.push(f.name);
+    }
+    if (invalid.length > 0) {
+      toast.error(
+        invalid.length === 1
+          ? `Skipped ${invalid[0]} — only PDF, CSV, or Apple Health ZIP`
+          : `Skipped ${invalid.length} unsupported files — only PDF, CSV, or Apple Health ZIP`
+      );
+    }
+    if (valid.length === 0) {
+      if (fileRef.current) fileRef.current.value = "";
+      return;
+    }
+
+    let succeeded = 0;
+    let totalObs = 0;
     try {
-      const fd = new FormData();
-      fd.append("file", file);
-      const res = await fetch(`${API}/api/upload`, { method: "POST", body: fd });
-      if (!res.ok) throw new Error((await res.json()).detail);
-      const data = await res.json();
-      const count = data.observations_found;
-      const msg = data.type === "lab_pdf"
-        ? `Added **${file.name}** — ${count} lab values are now in context.`
-        : data.type === "apple_health"
-        ? `Added **${file.name}** — ${count} daily Apple Health observations loaded.`
-        : `Added **${file.name}** — ${count} wearable observations loaded.`;
-      setMessages((m) => [...m, { role: "assistant", text: msg }]);
-      setLoadedFiles((f) => [...f, { name: file.name, type: data.type, count }]);
-      setHasExistingData(true);
-      toast.success("File uploaded");
-    } catch (err: unknown) {
-      toast.error(`Upload failed: ${err instanceof Error ? err.message : String(err)}`);
+      for (let i = 0; i < valid.length; i++) {
+        const file = valid[i];
+        const label = valid.length > 1 ? `${file.name} (${i + 1} of ${valid.length})` : file.name;
+        startUpload(label);
+        try {
+          const fd = new FormData();
+          fd.append("file", file);
+          const res = await fetch(`${API}/api/upload`, { method: "POST", body: fd });
+          if (!res.ok) throw new Error((await res.json()).detail);
+          const data = await res.json();
+          const count = data.observations_found;
+          succeeded++;
+          totalObs += count;
+          const msg = data.type === "lab_pdf"
+            ? `Added **${file.name}** — ${count} lab values are now in context.`
+            : data.type === "apple_health"
+            ? `Added **${file.name}** — ${count} daily Apple Health observations loaded.`
+            : `Added **${file.name}** — ${count} wearable observations loaded.`;
+          setMessages((m) => [...m, { role: "assistant", text: msg }]);
+          setLoadedFiles((f) => [...f, { name: file.name, type: data.type, count }]);
+          setHasExistingData(true);
+        } catch (err: unknown) {
+          toast.error(`${file.name} failed: ${err instanceof Error ? err.message : String(err)}`);
+        }
+      }
     } finally {
       finishUpload();
       if (fileRef.current) fileRef.current.value = "";
     }
+
+    if (succeeded > 1) {
+      toast.success(`Uploaded ${succeeded} files · ${totalObs} observations`);
+    } else if (succeeded === 1 && valid.length === 1) {
+      toast.success("File uploaded");
+    }
   }
 
   async function handleUpload(e: React.ChangeEvent<HTMLInputElement>) {
-    const file = e.target.files?.[0];
-    if (file) await processFile(file);
+    if (e.target.files && e.target.files.length > 0) await processFiles(e.target.files);
   }
 
   function handleDragEnter(e: React.DragEvent<HTMLLabelElement>) {
@@ -139,8 +169,31 @@ export default function ChatPage() {
     e.preventDefault();
     e.stopPropagation();
     setDragActive(false);
-    const file = e.dataTransfer.files?.[0];
-    if (file) await processFile(file);
+    const files = e.dataTransfer.files;
+    if (files && files.length > 0) await processFiles(files);
+  }
+
+  async function streamReply(fullText: string) {
+    // Split on whitespace boundaries so partial markdown (** _ etc.) doesn't
+    // render half-tagged mid-stream.
+    const tokens = fullText.split(/(\s+)/);
+    setMessages((m) => [...m, { role: "assistant", text: "" }]);
+    const tokensPerTick = 4;
+    const tickMs = 22;
+    for (let i = tokensPerTick; i < tokens.length; i += tokensPerTick) {
+      const partial = tokens.slice(0, i).join("");
+      setMessages((m) => {
+        const next = m.slice();
+        next[next.length - 1] = { role: "assistant", text: partial };
+        return next;
+      });
+      await new Promise<void>((r) => setTimeout(r, tickMs));
+    }
+    setMessages((m) => {
+      const next = m.slice();
+      next[next.length - 1] = { role: "assistant", text: fullText };
+      return next;
+    });
   }
 
   async function handleSend(e: React.FormEvent) {
@@ -158,7 +211,8 @@ export default function ChatPage() {
       });
       if (!res.ok) throw new Error((await res.json()).detail);
       const { reply } = await res.json();
-      setMessages((m) => [...m, { role: "assistant", text: reply }]);
+      setThinking(false);
+      await streamReply(reply);
     } catch (err: unknown) {
       toast.error(`Chat failed: ${err instanceof Error ? err.message : String(err)}`);
     } finally {
@@ -180,7 +234,7 @@ export default function ChatPage() {
         onDragLeave={handleDragLeave}
         onDrop={handleDrop}
       >
-        <input ref={fileRef} type="file" accept=".pdf,.csv,.zip" className="hidden" onChange={handleUpload} />
+        <input ref={fileRef} type="file" multiple accept=".pdf,.csv,.zip" className="hidden" onChange={handleUpload} />
         <div className="upload-icon">
           <span className="text-base">{uploading ? "⏳" : dragActive ? "⤓" : "📎"}</span>
         </div>
@@ -190,10 +244,10 @@ export default function ChatPage() {
           </p>
           <p className="upload-hint">
             {dragActive
-              ? "Release the file to ingest it"
+              ? "Release to ingest — multiple files supported"
               : hasExistingData
-              ? "Drop or click · PDF · CSV · Apple Health ZIP"
-              : "Drop or click · PDF lab reports · CSV wearables · Apple Health ZIP"}
+              ? "Drop or click · one or many · PDF · CSV · Apple Health ZIP"
+              : "Drop or click · one or many · PDF lab reports · CSV wearables · Apple Health ZIP"}
           </p>
         </div>
       </label>

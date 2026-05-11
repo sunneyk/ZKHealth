@@ -18,8 +18,8 @@ _VKEY = _CIRCUIT_DIR / "verification_key.json"
 
 # Shared secret used by attest_observation() to sign each commitment. In
 # production this would be a real Ed25519 keypair issued to a trusted source
-# (lab partner, wearable provider) — the demo uses a fixed HMAC key so the
-# end-to-end verification path stays self-contained.
+# (lab partner, wearable provider) — this implementation uses a fixed HMAC
+# key so the end-to-end verification path stays self-contained.
 _MOCK_SIGNING_KEY = b"zkhealth-demo-mock-signing-key-01"
 
 
